@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Топокарта — генератор местности</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🗺️ Топокарта</h1>
+    <span class="subtitle">Генератор местности для военно-ролевых игр</span>
+  </header>
+
+  <div class="layout">
+    <!-- Панель управления слева -->
+    <aside class="panel">
+      <section class="control-group">
+        <h2>Карта</h2>
+
+        <label>
+          Сид (зерно генерации)
+          <div class="seed-row">
+            <input type="number" id="seed" value="12345" />
+            <button id="randomSeed" title="Случайный сид">🎲</button>
+          </div>
+        </label>
+
+        <label>
+          Размер карты: <span id="sizeLabel">256</span>
+          <input type="range" id="size" min="128" max="512" step="64" value="256" />
+        </label>
+
+        <label>
+          Уровень воды: <span id="seaLabel">0.38</span>
+          <input type="range" id="sea" min="0" max="0.7" step="0.01" value="0.38" />
+        </label>
+
+        <label>
+          Лесистость: <span id="forestLabel">0.55</span>
+          <input type="range" id="forest" min="0" max="1" step="0.01" value="0.55" />
+        </label>
+
+        <label>
+          Кол-во городов: <span id="townsLabel">5</span>
+          <input type="range" id="towns" min="0" max="15" step="1" value="5" />
+        </label>
+      </section>
+
+      <section class="control-group">
+        <h2>Отображение</h2>
+        <label class="checkbox">
+          <input type="checkbox" id="showGrid" checked />
+          Сетка координат
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="showContours" checked />
+          Горизонтали (высоты)
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="showLabels" checked />
+          Подписи городов
+        </label>
+      </section>
+
+      <section class="control-group">
+        <button id="generate" class="primary">Сгенерировать карту</button>
+        <button id="export">Сохранить в PNG</button>
+      </section>
+
+      <p class="hint">Совет: меняй сид, чтобы получать разные местности. Один и тот же сид всегда даёт одинаковую карту.</p>
+    </aside>
+
+    <!-- Холст карты -->
+    <main class="map-area">
+      <canvas id="map" width="900" height="900"></canvas>
+    </main>
+  </div>
+
+  <!-- Скрипты: порядок важен — каждый следующий зависит от предыдущих -->
+  <script src="js/noise.js"></script>
+  <script src="js/generator.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
