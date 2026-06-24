@@ -26,7 +26,14 @@ const COLORS = {
   ROAD_CASING: "#ffffff",    // светлая обводка дорог
   GRID: "rgba(60, 70, 90, 0.35)",
   GRID_TEXT: "#3a4256",
-  TOWN_FILL: "#2b2b2b",
+  // Застройка городов
+  BUILTUP: "#ece0cf",        // лёгкая заливка пятна застройки
+  STREET: "#cfc8b8",         // улицы внутри города
+  SQUARE: "#f4eede",         // центральная площадь
+  HOUSE: "#4d4d4d",          // жилые дома
+  CIVIC: "#5a4c3f",          // гражданские здания (центр)
+  INDUSTRIAL: "#737373",     // промзона
+  BUILDING_EDGE: "rgba(0,0,0,0.35)",
   TOWN_TEXT: "#1a1a1a",
   TOWN_HALO: "#ffffff",
 };
@@ -232,42 +239,111 @@ class MapRenderer {
     }
   }
 
-  /* 5. Города: кружок с белым ореолом и подпись-позывной. */
+  /*
+   * 5. Города: детальная застройка — пятно застройки, площадь, улицы, дома.
+   * Сначала рисуем все «тела» городов, затем поверх — подписи, чтобы
+   * текст не перекрывался зданиями соседнего города.
+   */
   _drawTowns(map, showLabels) {
+    for (const town of map.towns) {
+      this._drawBuiltUp(town);
+      this._drawTownSquare(town);
+      this._drawTownStreets(town);
+      this._drawTownBuildings(town);
+    }
+    if (showLabels) {
+      for (const town of map.towns) this._drawTownLabel(town);
+    }
+  }
+
+  /* Лёгкая заливка пятна застройки — выделяет город на фоне местности. */
+  _drawBuiltUp(town) {
+    if (!town.extent) return;
     const ctx = this.ctx;
     const s = this.scale;
-
-    for (const town of map.towns) {
-      const cx = town.x * s;
-      const cy = town.y * s;
-      const r = 3 + town.size * 4;
-
-      // белый ореол под значком — чтобы город читался на любом фоне
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + 2, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS.TOWN_HALO;
-      ctx.fill();
-
-      // сам значок города
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS.TOWN_FILL;
-      ctx.fill();
-
-      if (showLabels) {
-        ctx.font = "bold 12px 'Segoe UI', sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        const tx = cx + r + 4;
-        const ty = cy;
-        // подпись с белой обводкой для читаемости
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = COLORS.TOWN_HALO;
-        ctx.strokeText(town.name, tx, ty);
-        ctx.fillStyle = COLORS.TOWN_TEXT;
-        ctx.fillText(town.name, tx, ty);
-      }
+    const N = town.extent.length;
+    ctx.beginPath();
+    for (let i = 0; i <= N; i++) {
+      const idx = i % N;
+      const ang = (idx / N) * Math.PI * 2;
+      const r = town.extent[idx];
+      const x = (town.x + Math.cos(ang) * r) * s;
+      const y = (town.y + Math.sin(ang) * r) * s;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
+    ctx.closePath();
+    ctx.fillStyle = COLORS.BUILTUP;
+    ctx.fill();
+  }
+
+  /* Центральная площадь — открытое светлое пятно в центре города. */
+  _drawTownSquare(town) {
+    if (!town.square) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.beginPath();
+    ctx.arc(town.x * s, town.y * s, town.square.r * s, 0, Math.PI * 2);
+    ctx.fillStyle = COLORS.SQUARE;
+    ctx.fill();
+  }
+
+  /* Сеть улиц внутри города. */
+  _drawTownStreets(town) {
+    if (!town.streets || town.streets.length === 0) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.strokeStyle = COLORS.STREET;
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (const [x1, y1, x2, y2] of town.streets) {
+      ctx.moveTo(x1 * s, y1 * s);
+      ctx.lineTo(x2 * s, y2 * s);
+    }
+    ctx.stroke();
+  }
+
+  /* Здания — повёрнутые прямоугольники, цвет зависит от типа застройки. */
+  _drawTownBuildings(town) {
+    if (!town.buildings) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    for (const b of town.buildings) {
+      const color =
+        b.kind === "industrial" ? COLORS.INDUSTRIAL :
+        b.kind === "civic" ? COLORS.CIVIC : COLORS.HOUSE;
+      const w = b.w * s;
+      const h = b.h * s;
+
+      ctx.save();
+      ctx.translate(b.x * s, b.y * s);
+      ctx.rotate(b.angle);
+      ctx.fillStyle = color;
+      ctx.fillRect(-w / 2, -h / 2, w, h);
+      // тонкая обводка, чтобы дом читался на светлом фоне
+      ctx.lineWidth = 0.4;
+      ctx.strokeStyle = COLORS.BUILDING_EDGE;
+      ctx.strokeRect(-w / 2, -h / 2, w, h);
+      ctx.restore();
+    }
+  }
+
+  /* Название города — над пятном застройки, с белой обводкой для читаемости. */
+  _drawTownLabel(town) {
+    const ctx = this.ctx;
+    const s = this.scale;
+    const cx = town.x * s;
+    const cy = town.y * s - (town.radius || 4) * s - 4;
+
+    ctx.font = "bold 12px 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = COLORS.TOWN_HALO;
+    ctx.strokeText(town.name, cx, cy);
+    ctx.fillStyle = COLORS.TOWN_TEXT;
+    ctx.fillText(town.name, cx, cy);
   }
 
   /* Аккуратная рамка вокруг всей карты. */
