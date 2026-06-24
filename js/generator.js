@@ -180,7 +180,6 @@ class MapGenerator {
 
     // 5) Населённые пункты и их виды (деревня…мегаполис)
     const towns = this._placeTowns(height, slope, type);
-    this._assignTiers(towns);
 
     // 6) Сеть дорог с учётом рельефа (поиск пути A* по «стоимости» местности)
     const cost = this._buildCostField(height, slope, type);
@@ -268,24 +267,38 @@ class MapGenerator {
     const size = this.size;
     const rivers = [];
     const target = Math.round(3 + size / 200); // примерное число рек
-    const maxTries = target * 60;
+    const maxTries = target * 80;
+    const stride = Math.max(2, Math.round(size / 140));
     let tries = 0;
     while (rivers.length < target && tries < maxTries) {
       tries++;
       const sx = Math.floor(this._rand() * size);
       const sy = Math.floor(this._rand() * size);
-      if (height[sy * size + sx] < 0.6) continue; // истоки — только высоко
-      const path = this._traceRiver(height, type, sx, sy);
-      if (path.length < Math.max(10, size * 0.06)) continue; // короткие отбрасываем
-      for (const [x, y] of path) {
-        type[y * size + x] = TERRAIN.WATER; // прорезаем русло
+      if (height[sy * size + sx] < 0.66) continue; // истоки — только на возвышенностях
+      const traced = this._traceRiver(height, type, sx, sy);
+      if (traced.path.length < Math.max(12, size * 0.07)) continue; // короткие отбрасываем
+
+      // Река должна заканчиваться в воде. Если стекла во впадину, а не в море —
+      // образуем там небольшое озеро, чтобы русло не обрывалось «в никуда».
+      if (!traced.reachedWater) {
+        this._makeLake(type, traced.path[traced.path.length - 1], size);
       }
+
+      // Сглаживаем русло: плавные изгибы вместо рваной ломаной (как у настоящих
+      // рек), и прорезаем непрерывный канал водой вдоль сглаженного пути.
+      const path = this._smoothPath(this._decimate(traced.path, stride));
+      this._carveAlong(type, path, size);
       rivers.push(path);
     }
     return rivers;
   }
 
-  /* Прослеживает одно русло «стеканием» вниз по склону из точки (x, y). */
+  /*
+   * Прослеживает одно русло «стеканием» вниз по склону из точки (x, y).
+   * Возвращает { path, reachedWater }: reachedWater = true, если река дошла до
+   * воды (моря, озера или другой реки — тогда получается приток), иначе она
+   * остановилась во впадине и в этом месте нужно образовать озеро.
+   */
   _traceRiver(height, type, x, y) {
     const size = this.size;
     const path = [[x, y]];
@@ -294,10 +307,11 @@ class MapGenerator {
     let py = y;
     let dirx = 0;
     let diry = 0;
-    const maxLen = Math.floor(size * 1.5);
+    let reachedWater = false;
+    const maxLen = Math.floor(size * 1.6);
     for (let step = 0; step < maxLen; step++) {
-      if (step > 0 && type[py * size + px] === TERRAIN.WATER) break; // впали в воду
-      if (height[py * size + px] < this.seaLevel) break;
+      if (step > 0 && type[py * size + px] === TERRAIN.WATER) { reachedWater = true; break; }
+      if (height[py * size + px] < this.seaLevel) { reachedWater = true; break; }
 
       // Ищем самого «низкого» соседа; небольшая инерция держит русло прямее.
       let bx = -1;
@@ -316,7 +330,7 @@ class MapGenerator {
         }
       }
       if (bx < 0) break; // тупик (всё вокруг уже посещено)
-      if (height[by * size + bx] > height[py * size + px] + 0.025) break; // впадина — конец реки
+      if (height[by * size + bx] > height[py * size + px] + 0.02) break; // впадина — конец
 
       dirx = Math.sign(bx - px);
       diry = Math.sign(by - py);
@@ -325,7 +339,54 @@ class MapGenerator {
       visited.add(py * size + px);
       path.push([px, py]);
     }
-    return path;
+    return { path, reachedWater };
+  }
+
+  /* Небольшое озеро в конце реки, если она не дошла до моря (сток во впадину). */
+  _makeLake(type, end, size) {
+    const ex = end[0];
+    const ey = end[1];
+    const r = 2 + Math.floor(this._rand() * 2); // радиус 2..3 клетки
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const nx = ex + dx;
+        const ny = ey + dy;
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        type[ny * size + nx] = TERRAIN.WATER;
+      }
+    }
+  }
+
+  /* Прорезает непрерывный канал воды вдоль (сглаженного) пути реки. */
+  _carveAlong(type, path, size) {
+    for (let i = 0; i < path.length - 1; i++) {
+      this._lineCells(
+        type,
+        Math.round(path[i][0]), Math.round(path[i][1]),
+        Math.round(path[i + 1][0]), Math.round(path[i + 1][1]),
+        size,
+      );
+    }
+  }
+
+  /* Отмечает водой клетки на отрезке (алгоритм Брезенхэма) — без разрывов. */
+  _lineCells(type, x0, y0, x1, y1, size) {
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0;
+    let y = y0;
+    let guard = 0;
+    while (guard++ < 4 * size) {
+      if (x >= 0 && y >= 0 && x < size && y < size) type[y * size + x] = TERRAIN.WATER;
+      if (x === x1 && y === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; x += sx; }
+      if (e2 < dx) { err += dx; y += sy; }
+    }
   }
 
   /*
@@ -574,41 +635,99 @@ class MapGenerator {
    */
   _placeTowns(height, slope, type) {
     const size = this.size;
-    const towns = [];
-    const minDist = size / (this.townCount + 1);
-    const minDist2 = minDist * minDist;
     const margin = Math.round(size * 0.045); // не селим у самой кромки карты
 
-    // Два прохода: сначала с порогом пригодности (отбираем хорошие места),
-    // затем, если не добрали, — без порога, лишь бы на суше и не вплотную.
-    for (const strict of [true, false]) {
-      let attempts = 0;
-      const maxAttempts = this.townCount * 300;
-      while (towns.length < this.townCount && attempts < maxAttempts) {
-        attempts++;
-        const x = Math.floor(this._rand() * size);
-        const y = Math.floor(this._rand() * size);
-        if (x < margin || y < margin || x >= size - margin || y >= size - margin) continue;
-        const i = y * size + x;
-        const t = type[i];
-        if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
-        if (strict && slope[i] > 0.05) continue; // на круче не строим
+    // Сколько пунктов какого вида (пирамида: мало крупных, много мелких).
+    const counts = this._tierCounts(this.townCount);
 
-        let tooClose = false;
-        for (const tw of towns) {
-          const dx = tw.x - x;
-          const dy = tw.y - y;
-          if (dx * dx + dy * dy < minDist2) { tooClose = true; break; }
-        }
-        if (tooClose) continue;
-
-        const suit = this._suitability(height, slope, type, x, y);
-        if (strict && suit < 0.3) continue;
-
-        towns.push({ x, y, suit });
+    // Размещаем ОТ КРУПНЫХ К МЕЛКИМ: сначала города на лучших местах и с большим
+    // интервалом друг от друга (чтобы мегаполисы не сливались в одно пятно),
+    // затем сёла и деревни заполняют промежутки. Это и даёт «иерархию» расселения.
+    const towns = [];
+    for (let tier = SETTLEMENT_TIERS.length - 1; tier >= 0; tier--) {
+      const tierRadius = SETTLEMENT_TIERS[tier].radiusFrac * size;
+      for (let k = 0; k < counts[tier]; k++) {
+        const town = this._placeOne(height, slope, type, towns, tier, tierRadius, margin);
+        if (town) towns.push(town);
       }
     }
     return towns;
+  }
+
+  /* Раскладка числа пунктов по видам (деревня…мегаполис), сумма = N. */
+  _tierCounts(N) {
+    const c = [0, 0, 0, 0, 0];
+    if (N <= 0) return c;
+    if (N === 1) { c[2] = 1; return c; }          // один пункт — пусть будет посёлок
+    if (N === 2) { c[1] = 1; c[2] = 1; return c; } // село + посёлок
+    let rem = N;
+    const take = (amt) => { amt = Math.max(0, Math.min(rem, amt)); rem -= amt; return amt; };
+    c[4] = take(N >= 8 ? 1 : 0);                    // мегаполис — только на крупных картах
+    c[3] = take(Math.max(1, Math.round(N * 0.13))); // города
+    c[2] = take(Math.max(1, Math.round(N * 0.20))); // посёлки
+    c[1] = take(Math.round(N * 0.34));              // сёла
+    c[0] = take(rem);                               // деревни — всё остальное
+    return c;
+  }
+
+  /*
+   * Подбирает место для одного пункта заданного вида: из множества случайных
+   * кандидатов берём самый пригодный (ровно, у воды, не на круче), соблюдая
+   * интервал до уже размещённых — тем больший, чем крупнее оба пункта.
+   * Если подходящего места нет — мягкий запасной проход (лишь бы на суше).
+   */
+  _placeOne(height, slope, type, existing, tier, tierRadius, margin) {
+    const size = this.size;
+    const span = size - 2 * margin;
+    const def = SETTLEMENT_TIERS[tier];
+
+    const spaced = (x, y, factor) => {
+      for (const tw of existing) {
+        const need = (tierRadius + tw._radiusCells) * factor + size * 0.02;
+        const dx = tw.x - x;
+        const dy = tw.y - y;
+        if (dx * dx + dy * dy < need * need) return false;
+      }
+      return true;
+    };
+
+    let best = null;
+    let bestScore = -Infinity;
+    const samples = 60 + tier * 45; // для крупных перебираем больше вариантов
+    for (let s = 0; s < samples; s++) {
+      const x = margin + Math.floor(this._rand() * span);
+      const y = margin + Math.floor(this._rand() * span);
+      const i = y * size + x;
+      const t = type[i];
+      if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
+      if (slope[i] > 0.05) continue;
+      if (!spaced(x, y, 1.25)) continue;
+      const suit = this._suitability(height, slope, type, x, y);
+      if (suit > bestScore) { bestScore = suit; best = { x, y }; }
+    }
+
+    // Запасные проходы со всё более мягкими требованиями.
+    if (!best) {
+      for (let s = 0; s < 250 && !best; s++) {
+        const x = margin + Math.floor(this._rand() * span);
+        const y = margin + Math.floor(this._rand() * span);
+        const t = type[y * size + x];
+        if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
+        if (!spaced(x, y, 0.85)) continue;
+        best = { x, y };
+      }
+    }
+    if (!best) return null;
+
+    best.tier = tier;
+    best.kind = def.key;
+    best.kindLabel = def.label;
+    best._radiusCells = tierRadius;
+    best.radius = Math.max(4, tierRadius * (0.85 + this._rand() * 0.3));
+    best.size = 0.4 + tier * 0.18; // обратная совместимость со старым полем
+    best.suit = bestScore;
+    best.name = this._settlementName(tier, existing.length);
+    return best;
   }
 
   /*
@@ -643,42 +762,6 @@ class MapGenerator {
     const central = Math.max(0, 1 - Math.hypot(cxn, cyn) * 1.6);
 
     return flat * 0.45 + water * 0.25 + low * 0.15 + central * 0.15;
-  }
-
-  /*
-   * Назначает каждому пункту «вид» (деревня…мегаполис) по правилу «ранг-размер»:
-   * лучших мест мало, и они становятся крупными городами; большинство — сёла и
-   * деревни. Заодно выдаём название, охват (radius) и совместимое поле size.
-   */
-  _assignTiers(towns) {
-    const N = towns.length;
-    // Лучшие по пригодности места — в начало (станут крупными пунктами).
-    const order = towns.map((_, idx) => idx).sort((a, b) => towns[b].suit - towns[a].suit);
-
-    for (let rank = 0; rank < N; rank++) {
-      const t = towns[order[rank]];
-      const frac = N > 1 ? rank / (N - 1) : 0;
-
-      let tier;
-      if (rank === 0 && N >= 7) tier = 4;       // единственный мегаполис на большой карте
-      else if (frac < 0.15) tier = 3;           // города
-      else if (frac < 0.40) tier = 2;           // посёлки
-      else if (frac < 0.72) tier = 1;           // сёла
-      else tier = 0;                            // деревни
-
-      // Небольшая случайная вариация ±1 уровень — для разнообразия.
-      const r = this._rand();
-      if (r < 0.12 && tier < 4) tier++;
-      else if (r > 0.90 && tier > 0) tier--;
-
-      const def = SETTLEMENT_TIERS[tier];
-      t.tier = tier;
-      t.kind = def.key;
-      t.kindLabel = def.label;
-      t.radius = Math.max(4, def.radiusFrac * this.size * (0.85 + this._rand() * 0.3));
-      t.size = 0.4 + tier * 0.18; // обратная совместимость со старым полем
-      t.name = this._settlementName(tier, rank);
-    }
   }
 
   /*

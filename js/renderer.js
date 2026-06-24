@@ -24,8 +24,7 @@ const COLORS = {
   [TERRAIN.HILL]: "#efe9cf",
   CONTOUR: "#bb8a5e",        // тонкие горизонтали (коричневые)
   CONTOUR_INDEX: "#9c6b3f",  // утолщённые (каждая пятая)
-  ROAD: "#d8674a",           // магистрали и обычные дороги
-  ROAD_MINOR: "#cf9270",     // местные дороги (светлее и тоньше)
+  ROAD: "#d8674a",           // дороги всех классов (различаются шириной)
   ROAD_CASING: "#ffffff",    // светлая обводка дорог
   BRIDGE: "#5a4632",         // перильца мостов
   GRID: "rgba(60, 70, 90, 0.35)",
@@ -267,15 +266,22 @@ class MapRenderer {
     ctx.lineJoin = "round";
     for (const river of map.rivers) {
       if (river.length < 2) continue;
+
+      // «Полноводность» реки определяем по её длине: крупная река чуть шире.
+      let spatial = 0;
       for (let i = 0; i < river.length - 1; i++) {
-        // ширина растёт от истока к устью
-        const t = i / (river.length - 1);
-        ctx.lineWidth = Math.max(1, s * (0.5 + t * 0.9));
-        ctx.beginPath();
-        ctx.moveTo(river[i][0] * s, river[i][1] * s);
-        ctx.lineTo(river[i + 1][0] * s, river[i + 1][1] * s);
-        ctx.stroke();
+        spatial += Math.hypot(river[i + 1][0] - river[i][0], river[i + 1][1] - river[i][1]);
       }
+      const sizeFactor = Math.min(1, spatial / (map.size * 0.45));
+
+      // Рисуем русло ОДНОЙ плавной линией (а не по сегментам) — без «стрелок» на
+      // стыках. Ширина не меньше клетки, чтобы перекрыть прорезанный канал и
+      // убрать «лесенку», и плавно растёт к крупным рекам.
+      ctx.lineWidth = Math.max(1.4, s * (0.85 + sizeFactor * 0.7));
+      ctx.beginPath();
+      ctx.moveTo(river[0][0] * s, river[0][1] * s);
+      for (let i = 1; i < river.length; i++) ctx.lineTo(river[i][0] * s, river[i][1] * s);
+      ctx.stroke();
     }
   }
 
@@ -307,10 +313,11 @@ class MapRenderer {
       ctx.lineWidth = dims(road.klass).cas;
       this._strokePath(road.path, s);
     }
-    // полотно
+    // полотно: все дороги одного «дорожного» цвета (красного), чтобы их нельзя
+    // было спутать с коричневыми горизонталями; класс различается шириной.
     for (const road of sorted) {
       if (!road.path || road.path.length < 2) continue;
-      ctx.strokeStyle = road.klass === "local" ? COLORS.ROAD_MINOR : COLORS.ROAD;
+      ctx.strokeStyle = COLORS.ROAD;
       ctx.lineWidth = dims(road.klass).road;
       this._strokePath(road.path, s);
     }
