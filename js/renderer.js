@@ -81,6 +81,7 @@ class MapRenderer {
     this._drawRoads(map);
     if (this.options.showGrid) this._drawGrid(map);
     this._drawTowns(map, this.options.showLabels);
+    this._drawScaleBar(map);
     this._drawBorder();
   }
 
@@ -378,8 +379,12 @@ class MapRenderer {
     const W = this.canvas.width;
     const H = this.canvas.height;
 
-    const divisions = Math.max(5, Math.round(map.size / 32));
-    const step = W / divisions;
+    // Сторона квадрата сетки — «круглое» число км, подобранное так, чтобы
+    // делений было около десятка. Так сетка отражает реальный масштаб карты.
+    const gridKm = this._niceStep(map.scaleKm / 9);
+    const pxPerKm = W / map.scaleKm;
+    const step = gridKm * pxPerKm;
+    const divisions = Math.ceil(map.scaleKm / gridKm);
 
     ctx.strokeStyle = COLORS.GRID;
     ctx.lineWidth = 1;
@@ -389,6 +394,7 @@ class MapRenderer {
 
     for (let i = 0; i <= divisions; i++) {
       const p = i * step;
+      if (p > W + 0.5) break;
       ctx.beginPath();
       ctx.moveTo(p, 0);
       ctx.lineTo(p, H);
@@ -408,6 +414,55 @@ class MapRenderer {
     }
   }
 
+  /* Подбирает «круглый» шаг (1/2/5×10ⁿ км), не меньший target. */
+  _niceStep(target) {
+    const steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000];
+    for (const s of steps) if (s >= target) return s;
+    return steps[steps.length - 1];
+  }
+
+  /*
+   * Масштабная линейка в левом нижнем углу: чёрно-белый отрезок, длина которого
+   * равна круглому числу километров. Сразу понятен реальный масштаб карты.
+   */
+  _drawScaleBar(map) {
+    const ctx = this.ctx;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const pxPerKm = W / map.scaleKm;
+
+    const barKm = this._niceStep(map.scaleKm / 6); // ~1/6 ширины карты
+    const barPx = barKm * pxPerKm;
+    const segments = barKm % 4 === 0 ? 4 : barKm % 3 === 0 ? 3 : 2;
+    const segPx = barPx / segments;
+
+    const x0 = 18;
+    const y0 = H - 30;
+    const h = 7;
+
+    // полупрозрачная подложка для читаемости
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.fillRect(x0 - 8, y0 - 16, barPx + 64, 34);
+
+    // чередующиеся чёрно-белые сегменты
+    for (let i = 0; i < segments; i++) {
+      ctx.fillStyle = i % 2 === 0 ? "#1a1a1a" : "#ffffff";
+      ctx.fillRect(x0 + i * segPx, y0, segPx, h);
+    }
+    ctx.strokeStyle = "#1a1a1a";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, barPx, h);
+
+    // подписи: 0 слева, число км справа
+    ctx.fillStyle = COLORS.GRID_TEXT;
+    ctx.font = "bold 11px 'Segoe UI', sans-serif";
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.fillText("0", x0 - 2, y0 - 2);
+    ctx.textAlign = "center";
+    ctx.fillText(`${barKm} км`, x0 + barPx, y0 - 2);
+  }
+
   /*
    * 6. Населённые пункты: пятно застройки, улицы, дома; затем отметки и подписи.
    * Сначала рисуем все «тела», потом поверх — подписи, чтобы текст не
@@ -419,6 +474,8 @@ class MapRenderer {
       this._drawTownStreets(town);
       this._drawTownBuildings(town);
     }
+    // Точка-отметка для мелких пунктов (деревня/село): на крупном регионе их
+    // застройка — всего пара блоков, и отметка помогает их не потерять.
     for (const town of map.towns) this._drawTownMarker(town);
     if (showLabels) {
       for (const town of map.towns) this._drawTownLabel(town);

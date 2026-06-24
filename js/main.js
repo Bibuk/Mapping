@@ -15,6 +15,7 @@
 const ui = {
   seed: document.getElementById("seed"),
   randomSeed: document.getElementById("randomSeed"),
+  scale: document.getElementById("scale"),
   size: document.getElementById("size"),
   sea: document.getElementById("sea"),
   forest: document.getElementById("forest"),
@@ -26,6 +27,7 @@ const ui = {
   generate: document.getElementById("generate"),
   export: document.getElementById("export"),
   // подписи рядом с ползунками
+  scaleLabel: document.getElementById("scaleLabel"),
   sizeLabel: document.getElementById("sizeLabel"),
   seaLabel: document.getElementById("seaLabel"),
   forestLabel: document.getElementById("forestLabel"),
@@ -43,6 +45,7 @@ let currentMap = null;
 function readSettings() {
   return {
     seed: parseInt(ui.seed.value, 10) || 0,
+    scaleKm: parseInt(ui.scale.value, 10),
     size: parseInt(ui.size.value, 10),
     seaLevel: parseFloat(ui.sea.value),
     forest: parseFloat(ui.forest.value),
@@ -76,6 +79,9 @@ function redraw() {
 
 /* Обновляет числовые подписи рядом с ползунками. */
 function updateLabels() {
+  const km = parseInt(ui.scale.value, 10);
+  const area = (km * km).toLocaleString("ru-RU"); // площадь региона, км²
+  ui.scaleLabel.textContent = `${km} км · ~${area} км²`;
   ui.sizeLabel.textContent = ui.size.value;
   ui.seaLabel.textContent = parseFloat(ui.sea.value).toFixed(2);
   ui.forestLabel.textContent = parseFloat(ui.forest.value).toFixed(2);
@@ -94,7 +100,7 @@ ui.randomSeed.addEventListener("click", () => {
 });
 
 // Ползунки: обновляем подписи сразу, карту перегенерируем по отпусканию.
-[ui.size, ui.sea, ui.forest, ui.towns].forEach((slider) => {
+[ui.scale, ui.size, ui.sea, ui.forest, ui.towns].forEach((slider) => {
   slider.addEventListener("input", updateLabels);
   slider.addEventListener("change", generateAndDraw);
 });

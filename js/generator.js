@@ -33,15 +33,17 @@ const ROAD_CLASS = {
  * Виды населённых пунктов — от деревни до мегаполиса.
  * Каждый вид (tier, «ранг» 0..4) задаёт свой размер, плотность застройки,
  * число главных улиц, долю гражданских/промышленных зданий и стиль названия.
- *   radiusFrac — охват пункта как доля размера карты (чтобы масштаб не «плыл»
- *                при смене разрешения).
+ *   radiusKm — РЕАЛЬНЫЙ радиус застройки в километрах (деревня ~0.35 км,
+ *              мегаполис ~9 км). На карте он переводится в клетки по масштабу,
+ *              поэтому на регионе в сотню км города выглядят пропорционально.
+ *   minKm    — минимальный реальный интервал до соседних пунктов (км).
  */
 const SETTLEMENT_TIERS = [
-  { key: "hamlet",     label: "деревня",   radiusFrac: 0.014, density: 0.50, branchMul: 0.5, civic: 0.04, industrial: 0.00, grid: false, mainRoads: 1, labelScale: 0.80 },
-  { key: "village",    label: "село",      radiusFrac: 0.022, density: 0.66, branchMul: 0.8, civic: 0.12, industrial: 0.05, grid: false, mainRoads: 2, labelScale: 0.95 },
-  { key: "town",       label: "посёлок",   radiusFrac: 0.035, density: 0.82, branchMul: 1.0, civic: 0.22, industrial: 0.12, grid: false, mainRoads: 2, labelScale: 1.12 },
-  { key: "city",       label: "город",     radiusFrac: 0.053, density: 0.92, branchMul: 1.3, civic: 0.32, industrial: 0.20, grid: true,  mainRoads: 3, labelScale: 1.34 },
-  { key: "metropolis", label: "мегаполис", radiusFrac: 0.080, density: 1.00, branchMul: 1.6, civic: 0.42, industrial: 0.28, grid: true,  mainRoads: 4, labelScale: 1.62 },
+  { key: "hamlet",     label: "деревня",   radiusKm: 0.30, minKm: 1.5,  density: 0.50, branchMul: 0.5, civic: 0.04, industrial: 0.00, grid: false, mainRoads: 1, labelScale: 0.80 },
+  { key: "village",    label: "село",      radiusKm: 0.60, minKm: 3.0,  density: 0.66, branchMul: 0.8, civic: 0.12, industrial: 0.05, grid: false, mainRoads: 2, labelScale: 0.95 },
+  { key: "town",       label: "посёлок",   radiusKm: 1.10, minKm: 6.0,  density: 0.82, branchMul: 1.0, civic: 0.22, industrial: 0.12, grid: false, mainRoads: 2, labelScale: 1.12 },
+  { key: "city",       label: "город",     radiusKm: 2.20, minKm: 11.0, density: 0.92, branchMul: 1.3, civic: 0.32, industrial: 0.20, grid: true,  mainRoads: 3, labelScale: 1.34 },
+  { key: "metropolis", label: "мегаполис", radiusKm: 4.50, minKm: 16.0, density: 1.00, branchMul: 1.6, civic: 0.42, industrial: 0.28, grid: true,  mainRoads: 4, labelScale: 1.62 },
 ];
 
 /*
@@ -109,6 +111,12 @@ class MapGenerator {
     this.seaLevel = options.seaLevel;
     this.forestAmount = options.forest;
     this.townCount = options.townCount;
+
+    // Реальный масштаб мира: сторона региона в километрах. Отсюда — размер
+    // клетки в км. Благодаря этому размеры пунктов задаются в реальных км, и
+    // на большом по охвату регионе города выглядят пропорционально мелкими.
+    this.scaleKm = options.scaleKm || 120;
+    this.cellKm = this.scaleKm / this.size;
 
     // Два независимых шума: один для высот, другой для влажности (распределение леса).
     this.heightNoise = new Noise(options.seed);
@@ -198,6 +206,8 @@ class MapGenerator {
     return {
       size,
       seaLevel: this.seaLevel,
+      scaleKm: this.scaleKm,
+      cellKm: this.cellKm,
       height,
       moisture,
       type,
@@ -645,7 +655,7 @@ class MapGenerator {
     // затем сёла и деревни заполняют промежутки. Это и даёт «иерархию» расселения.
     const towns = [];
     for (let tier = SETTLEMENT_TIERS.length - 1; tier >= 0; tier--) {
-      const tierRadius = SETTLEMENT_TIERS[tier].radiusFrac * size;
+      const tierRadius = SETTLEMENT_TIERS[tier].radiusKm / this.cellKm;
       for (let k = 0; k < counts[tier]; k++) {
         const town = this._placeOne(height, slope, type, towns, tier, tierRadius, margin);
         if (town) towns.push(town);
@@ -680,10 +690,18 @@ class MapGenerator {
     const size = this.size;
     const span = size - 2 * margin;
     const def = SETTLEMENT_TIERS[tier];
+    const cellKm = this.cellKm;
 
-    const spaced = (x, y, factor) => {
+    // Интервал между пунктами — по реальным расстояниям (км): крупные города
+    // держим дальше друг от друга. useFloor=false ослабляет требование на
+    // запасном проходе, чтобы всё-таки разместить пункт на тесной карте.
+    const spaced = (x, y, factor, useFloor) => {
       for (const tw of existing) {
-        const need = (tierRadius + tw._radiusCells) * factor + size * 0.02;
+        let need = (tierRadius + tw._radiusCells) * factor;
+        if (useFloor) {
+          const floorKm = Math.max(def.minKm, SETTLEMENT_TIERS[tw.tier].minKm);
+          need = Math.max(need, floorKm / cellKm);
+        }
         const dx = tw.x - x;
         const dy = tw.y - y;
         if (dx * dx + dy * dy < need * need) return false;
@@ -701,7 +719,7 @@ class MapGenerator {
       const t = type[i];
       if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
       if (slope[i] > 0.05) continue;
-      if (!spaced(x, y, 1.25)) continue;
+      if (!spaced(x, y, 1.1, true)) continue;
       const suit = this._suitability(height, slope, type, x, y);
       if (suit > bestScore) { bestScore = suit; best = { x, y }; }
     }
@@ -713,7 +731,7 @@ class MapGenerator {
         const y = margin + Math.floor(this._rand() * span);
         const t = type[y * size + x];
         if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
-        if (!spaced(x, y, 0.85)) continue;
+        if (!spaced(x, y, 0.8, false)) continue;
         best = { x, y };
       }
     }
