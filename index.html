@@ -27,8 +27,8 @@
         </label>
 
         <label>
-          Размер карты: <span id="sizeLabel">256</span>
-          <input type="range" id="size" min="128" max="512" step="64" value="256" />
+          Разрешение (детализация): <span id="sizeLabel">384</span>
+          <input type="range" id="size" min="192" max="640" step="64" value="384" />
         </label>
 
         <label>
@@ -42,9 +42,10 @@
         </label>
 
         <label>
-          Кол-во городов: <span id="townsLabel">5</span>
-          <input type="range" id="towns" min="0" max="15" step="1" value="5" />
+          Населённых пунктов: <span id="townsLabel">8</span>
+          <input type="range" id="towns" min="0" max="24" step="1" value="8" />
         </label>
+        <p class="hint">Чем больше пунктов, тем больше видов: от деревень до мегаполисов.</p>
       </section>
 
       <section class="control-group">
@@ -58,8 +59,12 @@
           Горизонтали (высоты)
         </label>
         <label class="checkbox">
+          <input type="checkbox" id="showRelief" checked />
+          Рельефная тень
+        </label>
+        <label class="checkbox">
           <input type="checkbox" id="showLabels" checked />
-          Подписи городов
+          Подписи пунктов
         </label>
       </section>
 
@@ -73,7 +78,7 @@
 
     <!-- Холст карты -->
     <main class="map-area">
-      <canvas id="map" width="900" height="900"></canvas>
+      <canvas id="map" width="1500" height="1500"></canvas>
     </main>
   </div>
 

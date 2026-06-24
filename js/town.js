@@ -1,15 +1,17 @@
 /*
- * town.js — реалистичная процедурная застройка города.
+ * town.js — реалистичная процедурная застройка населённого пункта.
  *
  * Главная идея реализма: дома стоят НЕ по ровной сетке, а вдоль дорог.
- * Поэтому сначала строим органичную дорожную сеть (изогнутые главные улицы
- * + ветвящиеся второстепенные), а затем расставляем здания вдоль этих дорог
- * с разрывами, разными размерами и падающей к окраине плотностью.
+ * Поэтому сначала строим органичную уличную сеть, а затем расставляем здания
+ * вдоль улиц с разрывами, разными размерами и падающей к окраине плотностью.
  *
- * Так город на карте выглядит как настоящий населённый пункт на тактической
- * карте, а не как абстрактная клетчатая схема.
+ * Что нового по сравнению с базовой версией:
+ *   - ВИД пункта (деревня…мегаполис) задаёт размер, плотность, число улиц,
+ *     долю гражданских/промышленных зданий и наличие квартальной сетки;
+ *   - главные улицы СТЫКУЮТСЯ с входящими трассами (town.incoming);
+ *   - застройка ОБХОДИТ крутые склоны и воду — город «садится» на рельеф.
  *
- * Всё детерминировано: один и тот же город (его координаты + сид карты)
+ * Всё детерминировано: один и тот же пункт (его координаты + сид карты)
  * всегда застраивается одинаково. Координаты — в «клетках» сетки карты.
  */
 
@@ -19,7 +21,7 @@ class TownBuilder {
     this.seed = seed >>> 0;
   }
 
-  /* Детерминированный ГПСЧ для конкретного города (зависит от его координат). */
+  /* Детерминированный ГПСЧ для конкретного пункта (зависит от его координат). */
   _rng(a, b) {
     let s = (this.seed ^ Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663)) >>> 0;
     return function () {
@@ -33,37 +35,79 @@ class TownBuilder {
   /*
    * Достраивает town полями: radius, angle, streets (массив полилиний),
    * buildings (массив зданий).
-   * grid — { type, size } для проверки, что не строим на воде.
+   * grid — { type, size, slope, height } для проверки рельефа.
    */
   build(town, grid) {
     const rng = this._rng(town.x, town.y);
+    const tier = town.tier | 0;
+    const def = SETTLEMENT_TIERS[tier] || SETTLEMENT_TIERS[1];
 
-    const baseR = 5 + town.size * 9; // общий «охват» города в клетках
+    // Охват пункта (в клетках). Берём из модели (зависит от вида), иначе считаем.
+    const baseR = town.radius || 5 + (town.size || 0.6) * 9;
     town.radius = baseR;
-    town.angle = rng() * Math.PI;
 
-    // --- Дорожная сеть ---
+    // --- Уличная сеть ---
     const roads = [];
-    // две главные дороги через центр под разными углами (слегка изогнутые)
-    roads.push(this._mainRoad(town, town.angle, baseR, rng));
-    roads.push(this._mainRoad(town, town.angle + Math.PI / 2 + (rng() - 0.5) * 0.8, baseR * 0.85, rng));
-    // второстепенные ответвления от главных дорог
-    const branches = Math.round(4 + town.size * 9);
+    // Главные улицы: их направления берём из входящих трасс, чтобы дороги
+    // «вливались» в город, а недостающие добираем веером.
+    const dirs = this._mainDirections(town, def.mainRoads, rng);
+    town.angle = dirs[0];
+    for (let k = 0; k < dirs.length; k++) {
+      const len = baseR * (k === 0 ? 1 : 0.8 + rng() * 0.25);
+      roads.push(this._mainRoad(town, dirs[k], len, rng));
+    }
+    // Крупные пункты: квартальная сетка в центре + кольцевая дорога.
+    if (def.grid) {
+      this._addGrid(roads, town, baseR, dirs[0], rng);
+      this._addRing(roads, town, baseR * 0.62, rng);
+    }
+    // Второстепенные ответвления — чем крупнее пункт, тем их больше.
+    const branches = Math.round((3 + tier * 4) * def.branchMul);
     for (let i = 0; i < branches; i++) this._addBranch(roads, town, baseR, rng);
     town.streets = roads;
 
-    // --- Застройка вдоль дорог ---
-    const indDir = rng() * Math.PI * 2; // направление промзоны (один сектор окраины)
+    // --- Застройка вдоль улиц ---
+    const indDir = rng() * Math.PI * 2; // направление промзоны (сектор окраины)
     const placed = []; // уже занятые точки — чтобы дома не налезали друг на друга
     const buildings = [];
     for (const road of roads) {
-      this._placeAlongRoad(road, town, baseR, grid, rng, indDir, placed, buildings);
+      this._placeAlongRoad(road, town, baseR, grid, rng, indDir, placed, buildings, def);
     }
+    // У деревень и сёл — несколько отдельных дворов/хуторов на окраине.
+    if (tier <= 1) this._scatterFarms(town, baseR, grid, rng, placed, buildings);
     town.buildings = buildings;
   }
 
   /*
-   * Главная дорога: полилиния от одного края города через центр к другому,
+   * Направления главных улиц. Стараемся использовать углы входящих трасс
+   * (town.incoming), убирая почти совпадающие (улица — это прямая через центр,
+   * угол a и a+π — одна и та же улица). Недостающие добираем «веером».
+   */
+  _mainDirections(town, count, rng) {
+    const dirs = [];
+    const addUnique = (a) => {
+      for (const d of dirs) {
+        let diff = Math.abs(((a - d) % Math.PI + Math.PI) % Math.PI);
+        if (diff > Math.PI / 2) diff = Math.PI - diff;
+        if (diff < 0.35) return; // слишком близко к уже имеющейся улице
+      }
+      dirs.push(a);
+    };
+
+    if (town.incoming && town.incoming.length) {
+      for (const a of town.incoming) addUnique(a);
+    }
+    let guard = 0;
+    while (dirs.length < Math.max(1, count) && guard < 12) {
+      guard++;
+      const base = dirs.length ? dirs[0] : rng() * Math.PI * 2;
+      addUnique(base + Math.PI / 2 + (rng() - 0.5) * 0.7);
+    }
+    return dirs;
+  }
+
+  /*
+   * Главная улица: полилиния от одного края города через центр к другому,
    * с плавным изгибом (параболой), чтобы улица не была идеально прямой.
    */
   _mainRoad(town, angle, length, rng) {
@@ -71,16 +115,56 @@ class TownBuilder {
     const sa = Math.sin(angle);
     const px = -sa; // нормаль (вбок)
     const py = ca;
-    const bend = (rng() - 0.5) * length * 0.4; // сила изгиба
+    const bend = (rng() - 0.5) * length * 0.4;
     const pts = [];
     const steps = 12;
     for (let i = 0; i <= steps; i++) {
-      const t = (i / steps) * 2 - 1;          // от -1 до 1
+      const t = (i / steps) * 2 - 1;       // от -1 до 1
       const along = t * length;
-      const curve = (1 - t * t) * bend;       // 0 на концах, максимум в центре
+      const curve = (1 - t * t) * bend;    // 0 на концах, максимум в центре
       pts.push([town.x + along * ca + curve * px, town.y + along * sa + curve * py]);
     }
     return pts;
+  }
+
+  /*
+   * Квартальная сетка в центре крупного города: несколько улиц параллельно
+   * главной и столько же поперёк. Даёт узнаваемый «городской» центр.
+   */
+  _addGrid(roads, town, baseR, angle, rng) {
+    const inner = baseR * 0.55;
+    const ca = Math.cos(angle);
+    const sa = Math.sin(angle);
+    const px = -sa;
+    const py = ca;
+    const lines = 2 + Math.floor(rng() * 2);
+    for (let s = -lines; s <= lines; s++) {
+      if (s === 0) continue;
+      const off = (s / lines) * inner;
+      // улица параллельно главной
+      roads.push([
+        [town.x - ca * inner + px * off, town.y - sa * inner + py * off],
+        [town.x + ca * inner + px * off, town.y + sa * inner + py * off],
+      ]);
+      // поперечная улица
+      roads.push([
+        [town.x - px * inner + ca * off, town.y - py * inner + sa * off],
+        [town.x + px * inner + ca * off, town.y + py * inner + sa * off],
+      ]);
+    }
+  }
+
+  /* Кольцевая дорога вокруг центра (слегка неровная окружность). */
+  _addRing(roads, town, r, rng) {
+    const pts = [];
+    const seg = 16;
+    const jitter = r * 0.12;
+    for (let i = 0; i <= seg; i++) {
+      const a = (i / seg) * Math.PI * 2;
+      const rr = r + (rng() - 0.5) * jitter;
+      pts.push([town.x + Math.cos(a) * rr, town.y + Math.sin(a) * rr]);
+    }
+    roads.push(pts);
   }
 
   /*
@@ -89,9 +173,9 @@ class TownBuilder {
    */
   _addBranch(roads, town, baseR, rng) {
     const base = roads[Math.floor(rng() * Math.min(roads.length, 2))];
+    if (!base || base.length < 3) return;
     const p = base[1 + Math.floor(rng() * (base.length - 2))];
 
-    // направление «наружу» от центра города + случайный поворот
     let dirX = p[0] - town.x;
     let dirY = p[1] - town.y;
     const dl = Math.hypot(dirX, dirY) || 1;
@@ -113,12 +197,13 @@ class TownBuilder {
   }
 
   /*
-   * Расставляет здания вдоль одной дороги (с обеих сторон).
-   * Дома «смотрят» на дорогу: ширина вдоль дороги, глубина — в сторону.
-   * Плотность падает к окраине, часть мест пустует (разрывы между домами).
+   * Расставляет здания вдоль одной улицы (с обеих сторон).
+   * Дома «смотрят» на улицу: ширина вдоль дороги, глубина — в сторону.
+   * Плотность падает к окраине и масштабируется видом пункта (def.density),
+   * доля гражданских/промышленных зданий тоже зависит от вида.
    */
-  _placeAlongRoad(road, town, baseR, grid, rng, indDir, placed, buildings) {
-    const step = 1.4; // шаг вдоль дороги между возможными домами
+  _placeAlongRoad(road, town, baseR, grid, rng, indDir, placed, buildings, def) {
+    const step = 1.3;
     for (let s = 0; s < road.length - 1; s++) {
       const a = road[s];
       const b = road[s + 1];
@@ -135,40 +220,43 @@ class TownBuilder {
         const py = a[1] + dirY * d;
         const dist = Math.hypot(px - town.x, py - town.y);
         const dRatio = dist / baseR;
-        if (dRatio > 1.05) continue; // вышли за город
+        if (dRatio > 1.05) continue;
 
-        // плотность: ближе к центру — гуще, к окраине — реже
-        const density = 0.9 - dRatio * 0.55;
+        const density = (0.92 - dRatio * 0.5) * def.density;
 
         for (const side of [-1, 1]) {
           if (rng() > density) continue; // разрыв в застройке
 
           const angToCenter = Math.atan2(py - town.y, px - town.x);
-          const industrial = dRatio > 0.5 && Math.abs(this._angDiff(angToCenter, indDir)) < 0.5;
+          const industrial =
+            def.industrial > 0 &&
+            dRatio > 0.5 &&
+            Math.abs(this._angDiff(angToCenter, indDir)) < 0.6 &&
+            rng() < def.industrial * 2;
 
           let kind, w, h, setback;
           if (industrial) {
             kind = "industrial";
-            w = 2.2 + rng() * 1.6; // крупные корпуса
-            h = 1.5 + rng() * 1.1;
-            setback = 1.6;
-          } else if (dRatio < 0.32 && rng() < 0.5) {
+            w = 2.2 + rng() * 1.8; // крупные корпуса
+            h = 1.6 + rng() * 1.2;
+            setback = 1.7;
+          } else if (dRatio < 0.34 && rng() < def.civic) {
             kind = "civic";
-            w = 1.5 + rng() * 0.9; // здания центра покрупнее
-            h = 1.3 + rng() * 0.7;
+            w = 1.5 + rng() * 1.0; // здания центра покрупнее
+            h = 1.3 + rng() * 0.8;
             setback = 1.1;
           } else {
             kind = "house";
-            w = 0.9 + rng() * 0.8; // обычные дома — мелкие
+            w = 0.85 + rng() * 0.8; // обычные дома — мелкие
             h = 0.8 + rng() * 0.6;
             setback = 0.9;
           }
 
-          const off = setback + h / 2; // отступ от оси дороги вбок
+          const off = setback + h / 2; // отступ от оси улицы вбок
           const bx = px + nx * side * off;
           const by = py + ny * side * off;
 
-          if (this._isWater(grid, bx, by)) continue;
+          if (this._isBlocked(grid, bx, by)) continue;
           if (this._tooClose(placed, bx, by, Math.max(w, h) * 0.7)) continue;
 
           placed.push([bx, by]);
@@ -179,10 +267,33 @@ class TownBuilder {
             h,
             angle: roadAngle + (rng() - 0.5) * 0.12, // лёгкий разнобой
             kind,
-            tone: rng(), // оттенок для разнообразия цвета
+            tone: rng(),
           });
         }
       }
+    }
+  }
+
+  /* Отдельные дворы/хутора на окраине деревень и сёл (вне улиц). */
+  _scatterFarms(town, baseR, grid, rng, placed, buildings) {
+    const n = 2 + Math.floor(rng() * 3);
+    for (let i = 0; i < n; i++) {
+      const a = rng() * Math.PI * 2;
+      const r = baseR * (0.7 + rng() * 0.45);
+      const bx = town.x + Math.cos(a) * r;
+      const by = town.y + Math.sin(a) * r;
+      if (this._isBlocked(grid, bx, by)) continue;
+      if (this._tooClose(placed, bx, by, 1.6)) continue;
+      placed.push([bx, by]);
+      buildings.push({
+        x: bx,
+        y: by,
+        w: 0.9 + rng() * 0.6,
+        h: 0.8 + rng() * 0.5,
+        angle: rng() * Math.PI,
+        kind: "house",
+        tone: rng(),
+      });
     }
   }
 
@@ -202,11 +313,18 @@ class TownBuilder {
     return false;
   }
 
-  /* Клетка под точкой — вода? (на воде не строим) */
-  _isWater(grid, wx, wy) {
+  /*
+   * Можно ли застраивать клетку под точкой?
+   * Нельзя на воде, на крутом склоне и за пределами карты — так город
+   * естественно «обтекает» реки, озёра и горы.
+   */
+  _isBlocked(grid, wx, wy) {
     const x = Math.round(wx);
     const y = Math.round(wy);
     if (x < 0 || y < 0 || x >= grid.size || y >= grid.size) return true;
-    return grid.type[y * grid.size + x] === TERRAIN.WATER;
+    const i = y * grid.size + x;
+    if (grid.type[i] === TERRAIN.WATER) return true;
+    if (grid.slope && grid.slope[i] > 0.06) return true; // слишком круто для застройки
+    return false;
   }
 }
