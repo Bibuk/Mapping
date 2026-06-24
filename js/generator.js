@@ -118,6 +118,10 @@ class MapGenerator {
     this.scaleKm = options.scaleKm || 120;
     this.cellKm = this.scaleKm / this.size;
 
+    // Высшая точка рельефа над уровнем моря (м) — для отметок высот и реализма.
+    // Берём детерминированно от сида, чтобы у разных карт были разные «горы».
+    this.maxElevM = 450 + (this.seed % 6) * 80; // 450..850 м
+
     // Два независимых шума: один для высот, другой для влажности (распределение леса).
     this.heightNoise = new Noise(options.seed);
     this.moistNoise = new Noise(options.seed + 9999);
@@ -186,8 +190,13 @@ class MapGenerator {
     //    размещения/застройки городов (не строим на круче).
     const slope = this._computeSlope(height);
 
-    // 5) Населённые пункты и их виды (деревня…мегаполис)
+    // 5) Населённые пункты и их виды (деревня…мегаполис). Имена назначаем
+    //    отдельным проходом — чтобы их выбор не влиял на геометрию размещения.
     const towns = this._placeTowns(height, slope, type);
+    this._nameTowns(towns);
+
+    // 5б) Заметные вершины с отметками высот (как на топокартах).
+    const peaks = this._findPeaks(height);
 
     // 6) Сеть дорог с учётом рельефа (поиск пути A* по «стоимости» местности)
     const cost = this._buildCostField(height, slope, type);
@@ -208,6 +217,7 @@ class MapGenerator {
       seaLevel: this.seaLevel,
       scaleKm: this.scaleKm,
       cellKm: this.cellKm,
+      maxElevM: this.maxElevM,
       height,
       moisture,
       type,
@@ -215,7 +225,60 @@ class MapGenerator {
       rivers,
       towns,
       roads,
+      peaks,
     };
+  }
+
+  /*
+   * Находит несколько заметных вершин: локальные максимумы рельефа на высоте,
+   * разнесённые друг от друга. Для каждой считаем высоту над уровнем моря в
+   * метрах (по maxElevM) — её и подпишет renderer, как на настоящих картах.
+   */
+  _findPeaks(height) {
+    const size = this.size;
+    const R = Math.max(2, Math.round(size * 0.014));
+    const candidates = [];
+    for (let y = R; y < size - R; y += 2) {
+      for (let x = R; x < size - R; x += 2) {
+        const h = height[y * size + x];
+        if (h < 0.72) continue; // только высокое
+        let isMax = true;
+        for (let a = 0; a < 8 && isMax; a++) {
+          const ang = (a / 8) * Math.PI * 2;
+          const nx = Math.round(x + Math.cos(ang) * R);
+          const ny = Math.round(y + Math.sin(ang) * R);
+          if (height[ny * size + nx] > h) isMax = false;
+        }
+        if (isMax) candidates.push({ x, y, h });
+      }
+    }
+    candidates.sort((a, b) => b.h - a.h);
+
+    const peaks = [];
+    const want = 3 + Math.round(size / 220);
+    const minSpacing = size * 0.13;
+    const minSpacing2 = minSpacing * minSpacing;
+    for (const c of candidates) {
+      if (peaks.length >= want) break;
+      let ok = true;
+      for (const p of peaks) {
+        const dx = p.x - c.x;
+        const dy = p.y - c.y;
+        if (dx * dx + dy * dy < minSpacing2) { ok = false; break; }
+      }
+      if (!ok) continue;
+      const above = (c.h - this.seaLevel) / (1 - this.seaLevel); // 0..1 над морем
+      const elevM = Math.round((above * this.maxElevM) / 10) * 10; // до десятков м
+      peaks.push({ x: c.x, y: c.y, elevM });
+    }
+    return peaks;
+  }
+
+  /* Назначает имена всем пунктам (отдельным проходом, без влияния на геометрию). */
+  _nameTowns(towns) {
+    for (let i = 0; i < towns.length; i++) {
+      towns[i].name = this._settlementName(towns[i].tier, i);
+    }
   }
 
   /*
@@ -744,7 +807,6 @@ class MapGenerator {
     best.radius = Math.max(4, tierRadius * (0.85 + this._rand() * 0.3));
     best.size = 0.4 + tier * 0.18; // обратная совместимость со старым полем
     best.suit = bestScore;
-    best.name = this._settlementName(tier, existing.length);
     return best;
   }
 
@@ -783,33 +845,54 @@ class MapGenerator {
   }
 
   /*
-   * Генерация русскоязычного названия в зависимости от вида пункта:
-   * города — на -ск/-град/-горск, посёлки — на -ово/-поль, сёла и деревни —
-   * на -овка/-ино/-ки. Следим, чтобы названия не повторялись.
+   * Название пункта берём из готовых списков реальных русских топонимов,
+   * подобранных по «весу» пункта: деревни и сёла — простые «деревенские»
+   * имена, посёлки — посолиднее, города и мегаполисы — «городские» (-ск,
+   * -горск, -град…). Готовые списки надёжнее «склейки» корня и суффикса,
+   * которая порождала корявые формы вроде «Журавлный». Имена не повторяются.
    */
   _settlementName(tier, salt) {
-    const roots = [
-      "Дуб", "Берёз", "Камен", "Сосн", "Ольх", "Лип", "Клён", "Вишн", "Ясен",
-      "Озёр", "Луг", "Холм", "Бор", "Тих", "Бел", "Красн", "Чёрн", "Зелен",
-      "Север", "Гор", "Стар", "Нов", "Велик", "Мал", "Песч", "Глин", "Соль",
-      "Рыб", "Медвеж", "Волч", "Журавл", "Соколь", "Вербн", "Ивн", "Топол",
-      "Гранит", "Кремн", "Полев", "Заречь", "Покров",
+    // Деревни и сёла (tier 0–1)
+    const small = [
+      "Берёзовка", "Дубовка", "Ивановка", "Петровка", "Сосновка", "Малиновка",
+      "Вишнёвка", "Ольховка", "Калиновка", "Кленовка", "Грушёвка", "Ореховка",
+      "Липовка", "Рябиновка", "Журавлёвка", "Соколовка", "Медведевка",
+      "Лебедёвка", "Бобровка", "Гремячье", "Заречное", "Подлесное", "Каменка",
+      "Песчаное", "Тихоновка", "Боровое", "Луговое", "Ключи", "Студёное",
+      "Ягодное", "Вязовка", "Осиновка", "Берёзники", "Дубки", "Ельники",
+      "Зайцево", "Лужки", "Сухарево", "Гречихино", "Михайловка",
     ];
-    let suf;
-    if (tier >= 3) suf = ["ск", "град", "горск", "поль", "бург"];
-    else if (tier === 2) suf = ["ово", "поль", "ный", "инск", "овск"];
-    else suf = ["овка", "инка", "ино", "ёвка", "ки", "евка"];
+    // Посёлки (tier 2)
+    const mid = [
+      "Берёзово", "Заречье", "Подгорное", "Лесной", "Озёрный", "Сосновое",
+      "Краснополье", "Светлое", "Новосёлово", "Старогорье", "Дубровка",
+      "Высокое", "Раздольное", "Привольное", "Боровское", "Тихоречье",
+      "Каменное", "Песчанское", "Зелёный Бор", "Сосновый Бор", "Михайловское",
+      "Никольское", "Спасское", "Троицкое", "Покровское", "Луговское",
+      "Озёрное", "Горное", "Красный Луг", "Майское",
+    ];
+    // Города и мегаполисы (tier 3–4)
+    const big = [
+      "Каменск", "Северск", "Белогорск", "Зеленоград", "Краснобор",
+      "Высокогорск", "Железногорск", "Светлоград", "Приморск", "Сосновоборск",
+      "Новокаменск", "Старобельск", "Верхнеуральск", "Нижнегорск", "Озёрск",
+      "Боровск", "Лесогорск", "Краснокамск", "Среднегорск", "Дальнегорск",
+      "Зареченск", "Великогорск", "Камышин", "Углегорск", "Белореченск",
+      "Южноморск", "Горнозаводск", "Северодвинск", "Краснодар", "Заволжск",
+    ];
+    const pool = tier >= 3 ? big : tier === 2 ? mid : small;
 
     if (!this._usedNames) this._usedNames = new Set();
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const root = roots[Math.floor(this._rand() * roots.length)];
-      const s = suf[Math.floor(this._rand() * suf.length)];
-      const name = root + s;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const name = pool[Math.floor(this._rand() * pool.length)];
       if (!this._usedNames.has(name)) { this._usedNames.add(name); return name; }
     }
-    // Запасной вариант — гарантированно уникальный.
-    const fallback = roots[salt % roots.length] + (tier >= 3 ? "ск" : "овка") + "-" + (salt + 1);
-    this._usedNames.add(fallback);
-    return fallback;
+    // Если список исчерпан — добавляем номер (как район большого города).
+    const base = pool[salt % pool.length];
+    let n = 2;
+    let name = `${base}-${n}`;
+    while (this._usedNames.has(name)) { n++; name = `${base}-${n}`; }
+    this._usedNames.add(name);
+    return name;
   }
 }

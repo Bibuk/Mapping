@@ -46,6 +46,10 @@ class TownBuilder {
     const baseR = town.radius || 5 + (town.size || 0.6) * 9;
     town.radius = baseR;
 
+    // Центральная площадь у посёлков и крупнее: оставляем середину открытой,
+    // и гражданские здания встают кольцом вокруг неё — как настоящий центр.
+    town.squareR = tier >= 2 ? baseR * 0.16 : 0;
+
     // --- Уличная сеть ---
     const roads = [];
     // Главные улицы: их направления берём из входящих трасс, чтобы дороги
@@ -255,6 +259,13 @@ class TownBuilder {
           const off = setback + h / 2; // отступ от оси улицы вбок
           const bx = px + nx * side * off;
           const by = py + ny * side * off;
+
+          // Не застраиваем центральную площадь — она остаётся открытой.
+          if (town.squareR) {
+            const sdx = bx - town.x;
+            const sdy = by - town.y;
+            if (sdx * sdx + sdy * sdy < town.squareR * town.squareR) continue;
+          }
 
           if (this._isBlocked(grid, bx, by)) continue;
           if (this._tooClose(placed, bx, by, Math.max(w, h) * 0.7)) continue;

@@ -24,6 +24,8 @@ const COLORS = {
   [TERRAIN.HILL]: "#efe9cf",
   CONTOUR: "#bb8a5e",        // тонкие горизонтали (коричневые)
   CONTOUR_INDEX: "#9c6b3f",  // утолщённые (каждая пятая)
+  FOREST_TREE: "rgba(108, 153, 96, 0.55)", // точки-«деревья» для текстуры леса
+  PEAK: "#6b4f33",           // отметки высот (вершины)
   ROAD: "#d8674a",           // дороги всех классов (различаются шириной)
   ROAD_CASING: "#ffffff",    // светлая обводка дорог
   BRIDGE: "#5a4632",         // перильца мостов
@@ -31,6 +33,7 @@ const COLORS = {
   GRID_TEXT: "#3a4256",
   // Застройка населённых пунктов
   BUILTUP: "#ece0cf",        // лёгкая заливка пятна застройки
+  SQUARE: "#f4eede",         // центральная площадь (открытое место)
   STREET: "#cfc8b8",         // улицы внутри пункта
   HOUSE: "#4d4d4d",          // жилые дома
   CIVIC: "#5a4c3f",          // гражданские здания (центр)
@@ -76,11 +79,13 @@ class MapRenderer {
     ctx.clearRect(0, 0, W, H);
 
     this._drawTerrain(map);
+    this._drawForest(map);
     if (this.options.showContours) this._drawContours(map);
     this._drawRivers(map);
     this._drawRoads(map);
     if (this.options.showGrid) this._drawGrid(map);
     this._drawTowns(map, this.options.showLabels);
+    if (this.options.showContours) this._drawPeaks(map);
     this._drawScaleBar(map);
     this._drawBorder();
   }
@@ -185,6 +190,70 @@ class MapRenderer {
     const f = Math.min(1, 0.62 + dot * 0.6);
     const g = Math.round(f * 255);
     return g < 150 ? 150 : g;
+  }
+
+  /*
+   * Текстура леса: поверх зелёной заливки набрасываем редкие точки-«деревья».
+   * Так лес читается как на топокартах, а не как сплошное пятно. Точки берём
+   * по огрублённой решётке с детерминированным сдвигом (зависит от клетки),
+   * поэтому при перерисовке картинка стабильна.
+   */
+  _drawForest(map) {
+    const ctx = this.ctx;
+    const size = map.size;
+    const s = this.scale;
+    // шаг решётки в клетках: чем мельче клетка на экране, тем реже точки
+    const stepCells = Math.max(3, Math.round(3.2 / s) + 3);
+    const r = Math.max(0.8, s * 0.32);
+    ctx.fillStyle = COLORS.FOREST_TREE;
+    for (let y = 1; y < size - 1; y += stepCells) {
+      for (let x = 1; x < size - 1; x += stepCells) {
+        if (map.type[y * size + x] !== TERRAIN.FOREST) continue;
+        // детерминированный «дребезг» позиции, чтобы не было ровных рядов
+        const hsh = (x * 374761393 + y * 668265263) >>> 0;
+        const jx = ((hsh & 255) / 255 - 0.5) * stepCells;
+        const jy = (((hsh >> 8) & 255) / 255 - 0.5) * stepCells;
+        const px = (x + jx) * s;
+        const py = (y + jy) * s;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /*
+   * Отметки высот на заметных вершинах: маленький треугольник и число метров
+   * над уровнем моря рядом. Классический элемент топографической карты.
+   */
+  _drawPeaks(map) {
+    if (!map.peaks || map.peaks.length === 0) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    for (const p of map.peaks) {
+      const px = p.x * s;
+      const py = p.y * s;
+
+      // треугольник-вершина
+      ctx.fillStyle = COLORS.PEAK;
+      ctx.beginPath();
+      ctx.moveTo(px, py - 4);
+      ctx.lineTo(px - 3.5, py + 2.5);
+      ctx.lineTo(px + 3.5, py + 2.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // подпись высоты с белым ореолом для читаемости
+      const text = `${p.elevM}`;
+      ctx.font = "bold 10px 'Segoe UI', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 2.4;
+      ctx.strokeStyle = COLORS.TOWN_HALO;
+      ctx.strokeText(text, px + 6, py + 1);
+      ctx.fillStyle = COLORS.PEAK;
+      ctx.fillText(text, px + 6, py + 1);
+    }
   }
 
   /*
@@ -471,6 +540,7 @@ class MapRenderer {
   _drawTowns(map, showLabels) {
     for (const town of map.towns) {
       this._drawBuiltUp(town);
+      this._drawTownSquare(town);
       this._drawTownStreets(town);
       this._drawTownBuildings(town);
     }
@@ -494,6 +564,17 @@ class MapRenderer {
       ctx.arc(b.x * s, b.y * s, r, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  /* Центральная площадь — открытое светлое пятно в середине посёлков/городов. */
+  _drawTownSquare(town) {
+    if (!town.squareR) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.fillStyle = COLORS.SQUARE;
+    ctx.beginPath();
+    ctx.arc(town.x * s, town.y * s, town.squareR * s, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   /* Сеть улиц внутри пункта — изогнутые полилинии. */
