@@ -21,6 +21,7 @@ const ui = {
   towns: document.getElementById("towns"),
   showGrid: document.getElementById("showGrid"),
   showContours: document.getElementById("showContours"),
+  showRelief: document.getElementById("showRelief"),
   showLabels: document.getElementById("showLabels"),
   generate: document.getElementById("generate"),
   export: document.getElementById("export"),
@@ -54,6 +55,7 @@ function readDisplayOptions() {
   return {
     showGrid: ui.showGrid.checked,
     showContours: ui.showContours.checked,
+    showRelief: ui.showRelief.checked,
     showLabels: ui.showLabels.checked,
   };
 }
@@ -98,7 +100,7 @@ ui.randomSeed.addEventListener("click", () => {
 });
 
 // Галочки отображения: только перерисовка, без новой генерации.
-[ui.showGrid, ui.showContours, ui.showLabels].forEach((cb) => {
+[ui.showGrid, ui.showContours, ui.showRelief, ui.showLabels].forEach((cb) => {
   cb.addEventListener("change", redraw);
 });
 
