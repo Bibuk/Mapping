@@ -1,0 +1,180 @@
+/* ====== Базовые стили и сброс ====== */
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --bg: #1e1f23;
+  --panel-bg: #2a2c31;
+  --panel-border: #3a3d44;
+  --text: #e8e8e8;
+  --text-dim: #a0a3aa;
+  --accent: #5c8a3a;       /* военно-зелёный */
+  --accent-hover: #6fa346;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ====== Верхняя панель ====== */
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.subtitle {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* ====== Раскладка: панель + карта ====== */
+.layout {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+  align-items: flex-start;
+}
+
+.panel {
+  flex: 0 0 280px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.control-group {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.control-group:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.control-group h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* ====== Поля ввода ====== */
+label {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+input[type="range"] {
+  width: 100%;
+  margin-top: 6px;
+  accent-color: var(--accent);
+}
+
+input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  background: #1b1c1f;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.seed-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.seed-row input {
+  flex: 1;
+}
+
+.seed-row button {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+/* ====== Кнопки ====== */
+button {
+  cursor: pointer;
+  padding: 8px 12px;
+  background: #3a3d44;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+button:hover {
+  background: #45484f;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  width: 100%;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+}
+
+#export {
+  width: 100%;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-top: 12px;
+}
+
+/* ====== Область карты ====== */
+.map-area {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 16px;
+  overflow: auto;
+}
+
+canvas {
+  background: #fff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-width: 100%;
+  height: auto;
+}
