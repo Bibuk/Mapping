@@ -32,6 +32,7 @@ class MapGenerator {
    */
   constructor(options) {
     this.size = options.size;
+    this.seed = options.seed >>> 0;
     this.seaLevel = options.seaLevel;
     this.forestAmount = options.forest;
     this.townCount = options.townCount;
@@ -145,6 +146,12 @@ class MapGenerator {
     // 3) Города и дороги
     const towns = this._placeTowns(height, type);
     const roads = this._buildRoads(towns, height);
+
+    // 4) Детальная застройка каждого города (дома, улицы, кварталы)
+    const builder = new TownBuilder(this.seed);
+    for (const town of towns) {
+      builder.build(town, { type, size });
+    }
 
     return {
       size,
