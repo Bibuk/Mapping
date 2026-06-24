@@ -247,7 +247,6 @@ class MapRenderer {
   _drawTowns(map, showLabels) {
     for (const town of map.towns) {
       this._drawBuiltUp(town);
-      this._drawTownSquare(town);
       this._drawTownStreets(town);
       this._drawTownBuildings(town);
     }
@@ -256,70 +255,56 @@ class MapRenderer {
     }
   }
 
-  /* Лёгкая заливка пятна застройки — выделяет город на фоне местности. */
+  /*
+   * Пятно застройки — лёгкая заливка под домами. Рисуем по светлому кружку
+   * вокруг каждого здания: там, где дома стоят плотно, кружки сливаются в
+   * единое «тело» города органичной формы, а на окраине остаются отдельные
+   * пятна. Это и даёт вид настоящего населённого пункта, а не круга.
+   */
   _drawBuiltUp(town) {
-    if (!town.extent) return;
+    if (!town.buildings) return;
     const ctx = this.ctx;
     const s = this.scale;
-    const N = town.extent.length;
-    ctx.beginPath();
-    for (let i = 0; i <= N; i++) {
-      const idx = i % N;
-      const ang = (idx / N) * Math.PI * 2;
-      const r = town.extent[idx];
-      const x = (town.x + Math.cos(ang) * r) * s;
-      const y = (town.y + Math.sin(ang) * r) * s;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
     ctx.fillStyle = COLORS.BUILTUP;
-    ctx.fill();
+    for (const b of town.buildings) {
+      const r = (Math.max(b.w, b.h) * 0.6 + 1.3) * s;
+      ctx.beginPath();
+      ctx.arc(b.x * s, b.y * s, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
-  /* Центральная площадь — открытое светлое пятно в центре города. */
-  _drawTownSquare(town) {
-    if (!town.square) return;
-    const ctx = this.ctx;
-    const s = this.scale;
-    ctx.beginPath();
-    ctx.arc(town.x * s, town.y * s, town.square.r * s, 0, Math.PI * 2);
-    ctx.fillStyle = COLORS.SQUARE;
-    ctx.fill();
-  }
-
-  /* Сеть улиц внутри города. */
+  /* Сеть улиц внутри города — изогнутые полилинии. */
   _drawTownStreets(town) {
     if (!town.streets || town.streets.length === 0) return;
     const ctx = this.ctx;
     const s = this.scale;
     ctx.strokeStyle = COLORS.STREET;
-    ctx.lineWidth = 1.2;
+    ctx.lineWidth = 1.3;
     ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.beginPath();
-    for (const [x1, y1, x2, y2] of town.streets) {
-      ctx.moveTo(x1 * s, y1 * s);
-      ctx.lineTo(x2 * s, y2 * s);
+    for (const line of town.streets) {
+      if (line.length < 2) continue;
+      ctx.moveTo(line[0][0] * s, line[0][1] * s);
+      for (let i = 1; i < line.length; i++) ctx.lineTo(line[i][0] * s, line[i][1] * s);
     }
     ctx.stroke();
   }
 
-  /* Здания — повёрнутые прямоугольники, цвет зависит от типа застройки. */
+  /* Здания — повёрнутые прямоугольники; цвет зависит от типа и слегка варьируется. */
   _drawTownBuildings(town) {
     if (!town.buildings) return;
     const ctx = this.ctx;
     const s = this.scale;
     for (const b of town.buildings) {
-      const color =
-        b.kind === "industrial" ? COLORS.INDUSTRIAL :
-        b.kind === "civic" ? COLORS.CIVIC : COLORS.HOUSE;
       const w = b.w * s;
       const h = b.h * s;
 
       ctx.save();
       ctx.translate(b.x * s, b.y * s);
       ctx.rotate(b.angle);
-      ctx.fillStyle = color;
+      ctx.fillStyle = this._buildingColor(b);
       ctx.fillRect(-w / 2, -h / 2, w, h);
       // тонкая обводка, чтобы дом читался на светлом фоне
       ctx.lineWidth = 0.4;
@@ -327,6 +312,15 @@ class MapRenderer {
       ctx.strokeRect(-w / 2, -h / 2, w, h);
       ctx.restore();
     }
+  }
+
+  /* Цвет здания: базовый по типу + лёгкий разброс яркости (tone) для текстуры. */
+  _buildingColor(b) {
+    if (b.kind === "industrial") return COLORS.INDUSTRIAL;
+    if (b.kind === "civic") return COLORS.CIVIC;
+    // жилые дома: оттенок серого от тёмного к чуть светлее
+    const g = Math.round(63 + (b.tone || 0) * 25); // 63..88
+    return `rgb(${g}, ${g}, ${g})`;
   }
 
   /* Название города — над пятном застройки, с белой обводкой для читаемости. */
