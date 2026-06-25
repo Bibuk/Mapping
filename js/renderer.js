@@ -24,6 +24,8 @@ const COLORS = {
   [TERRAIN.HILL]: "#efe9cf",
   CONTOUR: "#bb8a5e",        // тонкие горизонтали (коричневые)
   CONTOUR_INDEX: "#9c6b3f",  // утолщённые (каждая пятая)
+  FOREST_TREE: "rgba(108, 153, 96, 0.55)", // точки-«деревья» для текстуры леса
+  PEAK: "#6b4f33",           // отметки высот (вершины)
   ROAD: "#d8674a",           // дороги всех классов (различаются шириной)
   ROAD_CASING: "#ffffff",    // светлая обводка дорог
   BRIDGE: "#5a4632",         // перильца мостов
@@ -31,7 +33,9 @@ const COLORS = {
   GRID_TEXT: "#3a4256",
   // Застройка населённых пунктов
   BUILTUP: "#ece0cf",        // лёгкая заливка пятна застройки
-  STREET: "#cfc8b8",         // улицы внутри пункта
+  SQUARE: "#f4eede",         // центральная площадь (открытое место)
+  PARK: "#bfe0a6",           // парки/скверы внутри города
+  STREET: "#f1ede2",         // улицы внутри пункта (светлые, как на картах)
   HOUSE: "#4d4d4d",          // жилые дома
   CIVIC: "#5a4c3f",          // гражданские здания (центр)
   INDUSTRIAL: "#737373",     // промзона
@@ -49,6 +53,16 @@ const TERRAIN_RGB = {
   [TERRAIN.FIELD]: [251, 248, 227],
   [TERRAIN.FOREST]: [188, 217, 160],
   [TERRAIN.HILL]: [239, 233, 207],
+};
+
+// Оформление точек ресурсов: цвет и буква-обозначение (рус. первая буква).
+const RESOURCE_STYLE = {
+  oil:   { color: "#222222", glyph: "Н" }, // нефть
+  wood:  { color: "#2f7d32", glyph: "Л" }, // лес
+  gold:  { color: "#d4a017", glyph: "З" }, // золото
+  iron:  { color: "#8a8f98", glyph: "Р" }, // руда
+  coal:  { color: "#3a3a3a", glyph: "У" }, // уголь
+  stone: { color: "#9a8f80", glyph: "К" }, // камень
 };
 
 class MapRenderer {
@@ -73,15 +87,51 @@ class MapRenderer {
     // во сколько пикселей превращается одна клетка сетки
     this.scale = W / map.size;
 
-    ctx.clearRect(0, 0, W, H);
+    // Какой момент истории показываем (по умолчанию — финал).
+    const tick = this.options.tick != null ? this.options.tick : (map.ticks ? map.ticks - 1 : 0);
 
+    // Статичный «фон» (рельеф/лес/горизонтали/реки) не зависит от тика — кэшируем
+    // его в отдельном холсте, чтобы анимация развития оставалась быстрой.
+    this._ensureBase(map);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(this._baseCanvas, 0, 0);
+
+    // Динамические слои зависят от тика симуляции.
+    this._drawRoadsAt(map, tick);
+    if (this.options.showGrid) this._drawGrid(map);
+    this._drawResources(map, tick);
+    this._drawTownsAt(map, tick);
+    if (this.options.showContours) this._drawPeaks(map);
+    this._drawScaleBar(map);
+    this._drawBorder();
+  }
+
+  /*
+   * Готовит (и кэширует) статичный фон карты. Перерисовываем его только если
+   * сменилась карта или галочки рельефа/горизонталей — а не на каждом тике.
+   */
+  _ensureBase(map) {
+    const flags = (this.options.showContours ? 2 : 0) + (this.options.showRelief !== false ? 1 : 0);
+    if (this._baseMap === map && this._baseFlags === flags && this._baseCanvas) return;
+    this._baseMap = map;
+    this._baseFlags = flags;
+
+    if (!this._baseCanvas || this._baseCanvas.width !== this.canvas.width) {
+      this._baseCanvas = document.createElement("canvas");
+      this._baseCanvas.width = this.canvas.width;
+      this._baseCanvas.height = this.canvas.height;
+      this._baseCtx = this._baseCanvas.getContext("2d");
+    }
+
+    // Методы рисуют в this.ctx — временно подменяем его на холст фона.
+    const realCtx = this.ctx;
+    this.ctx = this._baseCtx;
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawTerrain(map);
+    this._drawForest(map);
     if (this.options.showContours) this._drawContours(map);
     this._drawRivers(map);
-    this._drawRoads(map);
-    if (this.options.showGrid) this._drawGrid(map);
-    this._drawTowns(map, this.options.showLabels);
-    this._drawBorder();
+    this.ctx = realCtx;
   }
 
   /* Готовит вспомогательные холсты под размер сетки (создаём один раз). */
@@ -184,6 +234,70 @@ class MapRenderer {
     const f = Math.min(1, 0.62 + dot * 0.6);
     const g = Math.round(f * 255);
     return g < 150 ? 150 : g;
+  }
+
+  /*
+   * Текстура леса: поверх зелёной заливки набрасываем редкие точки-«деревья».
+   * Так лес читается как на топокартах, а не как сплошное пятно. Точки берём
+   * по огрублённой решётке с детерминированным сдвигом (зависит от клетки),
+   * поэтому при перерисовке картинка стабильна.
+   */
+  _drawForest(map) {
+    const ctx = this.ctx;
+    const size = map.size;
+    const s = this.scale;
+    // шаг решётки в клетках: чем мельче клетка на экране, тем реже точки
+    const stepCells = Math.max(3, Math.round(3.2 / s) + 3);
+    const r = Math.max(0.8, s * 0.32);
+    ctx.fillStyle = COLORS.FOREST_TREE;
+    for (let y = 1; y < size - 1; y += stepCells) {
+      for (let x = 1; x < size - 1; x += stepCells) {
+        if (map.type[y * size + x] !== TERRAIN.FOREST) continue;
+        // детерминированный «дребезг» позиции, чтобы не было ровных рядов
+        const hsh = (x * 374761393 + y * 668265263) >>> 0;
+        const jx = ((hsh & 255) / 255 - 0.5) * stepCells;
+        const jy = (((hsh >> 8) & 255) / 255 - 0.5) * stepCells;
+        const px = (x + jx) * s;
+        const py = (y + jy) * s;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /*
+   * Отметки высот на заметных вершинах: маленький треугольник и число метров
+   * над уровнем моря рядом. Классический элемент топографической карты.
+   */
+  _drawPeaks(map) {
+    if (!map.peaks || map.peaks.length === 0) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    for (const p of map.peaks) {
+      const px = p.x * s;
+      const py = p.y * s;
+
+      // треугольник-вершина
+      ctx.fillStyle = COLORS.PEAK;
+      ctx.beginPath();
+      ctx.moveTo(px, py - 4);
+      ctx.lineTo(px - 3.5, py + 2.5);
+      ctx.lineTo(px + 3.5, py + 2.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // подпись высоты с белым ореолом для читаемости
+      const text = `${p.elevM}`;
+      ctx.font = "bold 10px 'Segoe UI', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 2.4;
+      ctx.strokeStyle = COLORS.TOWN_HALO;
+      ctx.strokeText(text, px + 6, py + 1);
+      ctx.fillStyle = COLORS.PEAK;
+      ctx.fillText(text, px + 6, py + 1);
+    }
   }
 
   /*
@@ -291,13 +405,18 @@ class MapRenderer {
    * затем сама дорога. Ширина и цвет зависят от класса (магистраль/дорога/местная).
    * Магистрали рисуем последними, чтобы они были «главнее» на развязках.
    */
-  _drawRoads(map) {
+  _drawRoadsAt(map, tick) {
     const ctx = this.ctx;
     const s = this.scale;
     if (!map.roads || map.roads.length === 0) return;
 
+    // Видны только дороги, построенные к этому тику.
+    const visible = map.roads.filter(
+      (r) => (r.builtTick == null || r.builtTick <= tick) && r.path && r.path.length >= 2,
+    );
     const rank = { local: 0, main: 1, highway: 2 };
-    const sorted = map.roads.slice().sort((a, b) => (rank[a.klass] || 0) - (rank[b.klass] || 0));
+    const trade = visible.filter((r) => r.kind !== "resource").sort((a, b) => (rank[a.klass] || 0) - (rank[b.klass] || 0));
+    const service = visible.filter((r) => r.kind === "resource");
     const dims = (k) =>
       k === "highway" ? { cas: 7.5, road: 4 } :
       k === "main" ? { cas: 5.5, road: 2.8 } :
@@ -306,23 +425,58 @@ class MapRenderer {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    // подложка
-    ctx.strokeStyle = COLORS.ROAD_CASING;
-    for (const road of sorted) {
-      if (!road.path || road.path.length < 2) continue;
-      ctx.lineWidth = dims(road.klass).cas;
-      this._strokePath(road.path, s);
-    }
-    // полотно: все дороги одного «дорожного» цвета (красного), чтобы их нельзя
-    // было спутать с коричневыми горизонталями; класс различается шириной.
-    for (const road of sorted) {
-      if (!road.path || road.path.length < 2) continue;
-      ctx.strokeStyle = COLORS.ROAD;
-      ctx.lineWidth = dims(road.klass).road;
-      this._strokePath(road.path, s);
-    }
+    // Подъездные дороги к шахтам — тонкой пунктирной «времянкой».
+    ctx.strokeStyle = COLORS.ROAD;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([4, 3]);
+    for (const r of service) this._strokePath(r.path, s);
+    ctx.setLineDash([]);
 
-    this._drawBridges(map, sorted, dims);
+    // Межгородские дороги: светлая подложка, затем полотно (по классу — шириной).
+    ctx.strokeStyle = COLORS.ROAD_CASING;
+    for (const r of trade) { ctx.lineWidth = dims(r.klass).cas; this._strokePath(r.path, s); }
+    for (const r of trade) { ctx.strokeStyle = COLORS.ROAD; ctx.lineWidth = dims(r.klass).road; this._strokePath(r.path, s); }
+
+    this._drawBridges(map, trade, dims);
+  }
+
+  /*
+   * Точки ресурсов. Неосвоенные — «пустой» кружок (контур цвета ресурса с
+   * буквой), освоенные (построена шахта) — залитый кружок с белой буквой и
+   * обводкой. Размер чуть растёт с богатством. Буква — рус. первая (Н, Л, З…).
+   */
+  _drawResources(map, tick) {
+    if (!map.resources) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const r of map.resources) {
+      const st = RESOURCE_STYLE[r.type] || { color: "#666", glyph: "?" };
+      const px = r.x * s;
+      const py = r.y * s;
+      const mined = r.mineTick >= 0 && r.mineTick <= tick;
+      const rad = 5 + r.amount; // 6..8 по богатству
+
+      ctx.beginPath();
+      ctx.arc(px, py, rad, 0, Math.PI * 2);
+      if (mined) {
+        ctx.fillStyle = st.color;
+        ctx.fill();
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = "#ffffff";
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = "rgba(255,255,255,0.78)";
+        ctx.fill();
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = st.color;
+        ctx.stroke();
+      }
+      ctx.fillStyle = mined ? "#ffffff" : st.color;
+      ctx.font = `bold ${rad + 2}px 'Segoe UI', sans-serif`;
+      ctx.fillText(st.glyph, px, py + 0.5);
+    }
   }
 
   /* Вспомогательное: обвести полилинию (координаты в клетках → пиксели). */
@@ -378,8 +532,12 @@ class MapRenderer {
     const W = this.canvas.width;
     const H = this.canvas.height;
 
-    const divisions = Math.max(5, Math.round(map.size / 32));
-    const step = W / divisions;
+    // Сторона квадрата сетки — «круглое» число км, подобранное так, чтобы
+    // делений было около десятка. Так сетка отражает реальный масштаб карты.
+    const gridKm = this._niceStep(map.scaleKm / 9);
+    const pxPerKm = W / map.scaleKm;
+    const step = gridKm * pxPerKm;
+    const divisions = Math.ceil(map.scaleKm / gridKm);
 
     ctx.strokeStyle = COLORS.GRID;
     ctx.lineWidth = 1;
@@ -389,6 +547,7 @@ class MapRenderer {
 
     for (let i = 0; i <= divisions; i++) {
       const p = i * step;
+      if (p > W + 0.5) break;
       ctx.beginPath();
       ctx.moveTo(p, 0);
       ctx.lineTo(p, H);
@@ -408,30 +567,99 @@ class MapRenderer {
     }
   }
 
+  /* Подбирает «круглый» шаг (1/2/5×10ⁿ км), не меньший target. */
+  _niceStep(target) {
+    const steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000];
+    for (const s of steps) if (s >= target) return s;
+    return steps[steps.length - 1];
+  }
+
+  /*
+   * Масштабная линейка в левом нижнем углу: чёрно-белый отрезок, длина которого
+   * равна круглому числу километров. Сразу понятен реальный масштаб карты.
+   */
+  _drawScaleBar(map) {
+    const ctx = this.ctx;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const pxPerKm = W / map.scaleKm;
+
+    const barKm = this._niceStep(map.scaleKm / 6); // ~1/6 ширины карты
+    const barPx = barKm * pxPerKm;
+    const segments = barKm % 4 === 0 ? 4 : barKm % 3 === 0 ? 3 : 2;
+    const segPx = barPx / segments;
+
+    const x0 = 18;
+    const y0 = H - 30;
+    const h = 7;
+
+    // полупрозрачная подложка для читаемости
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.fillRect(x0 - 8, y0 - 16, barPx + 64, 34);
+
+    // чередующиеся чёрно-белые сегменты
+    for (let i = 0; i < segments; i++) {
+      ctx.fillStyle = i % 2 === 0 ? "#1a1a1a" : "#ffffff";
+      ctx.fillRect(x0 + i * segPx, y0, segPx, h);
+    }
+    ctx.strokeStyle = "#1a1a1a";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, barPx, h);
+
+    // подписи: 0 слева, число км справа
+    ctx.fillStyle = COLORS.GRID_TEXT;
+    ctx.font = "bold 11px 'Segoe UI', sans-serif";
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.fillText("0", x0 - 2, y0 - 2);
+    ctx.textAlign = "center";
+    ctx.fillText(`${barKm} км`, x0 + barPx, y0 - 2);
+  }
+
   /*
    * 6. Населённые пункты: пятно застройки, улицы, дома; затем отметки и подписи.
    * Сначала рисуем все «тела», потом поверх — подписи, чтобы текст не
    * перекрывался зданиями соседнего пункта.
    */
-  _drawTowns(map, showLabels) {
+  _drawTownsAt(map, tick) {
+    const hist = map.history && map.history[tick];
+    const stateOf = (town) =>
+      hist ? hist[town.id] : { pop: town.pop, tier: town.tier, industry: town.industry, alive: true };
+
     for (const town of map.towns) {
-      this._drawBuiltUp(town);
-      this._drawTownStreets(town);
-      this._drawTownBuildings(town);
+      const st = stateOf(town);
+      if (!st || !st.alive) continue;
+      // Доля «проявленной» застройки: площадь ∝ населению, поэтому радиус ∝ √pop.
+      const vf = Math.min(1, Math.sqrt(st.pop / Math.max(1, town.pop)));
+      this._drawBuiltUp(town, vf);
+      this._drawTownParks(town, vf);
+      if (st.tier >= 2) this._drawTownSquare(town);
+      this._drawTownStreets(town, vf);
+      this._drawTownBuildings(town, vf, st.industry);
     }
-    for (const town of map.towns) this._drawTownMarker(town);
-    if (showLabels) {
-      for (const town of map.towns) this._drawTownLabel(town);
+    // Точка-отметка для мелких пунктов (деревня/село) — чтобы их не потерять.
+    for (const town of map.towns) {
+      const st = stateOf(town);
+      if (st && st.alive) this._drawTownMarker(town, st.tier);
+    }
+    if (this.options.showLabels) {
+      for (const town of map.towns) {
+        const st = stateOf(town);
+        if (!st || !st.alive) continue;
+        const vf = Math.min(1, Math.sqrt(st.pop / Math.max(1, town.pop)));
+        this._drawTownLabel(town, st.tier, vf);
+      }
     }
   }
 
-  /* Пятно застройки — лёгкая заливка под домами (сливается в «тело» пункта). */
-  _drawBuiltUp(town) {
+  /* Пятно застройки — заливка под «проявленными» домами (b.dc ≤ vf). */
+  _drawBuiltUp(town, vf = 1) {
     if (!town.buildings) return;
     const ctx = this.ctx;
     const s = this.scale;
     ctx.fillStyle = COLORS.BUILTUP;
     for (const b of town.buildings) {
+      if (b.dc != null && b.dc > vf) continue;
       const r = (Math.max(b.w, b.h) * 0.6 + 1.3) * s;
       ctx.beginPath();
       ctx.arc(b.x * s, b.y * s, r, 0, Math.PI * 2);
@@ -439,30 +667,80 @@ class MapRenderer {
     }
   }
 
-  /* Сеть улиц внутри пункта — изогнутые полилинии. */
-  _drawTownStreets(town) {
+  /* Центральная площадь — открытое светлое пятно в середине посёлков/городов. */
+  _drawTownSquare(town) {
+    if (!town.squareR) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.fillStyle = COLORS.SQUARE;
+    ctx.beginPath();
+    ctx.arc(town.x * s, town.y * s, town.squareR * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /* Зелёные кварталы-парки внутри города (проявляются по мере роста). */
+  _drawTownParks(town, vf = 1) {
+    if (!town.parks || town.parks.length === 0) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.fillStyle = COLORS.PARK;
+    for (const p of town.parks) {
+      if (p.dc != null && p.dc > vf) continue;
+      const poly = p.poly;
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0] * s, poly[0][1] * s);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0] * s, poly[i][1] * s);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  /*
+   * Сеть улиц внутри пункта. Главные «проспекты» рисуем шире обычных улиц.
+   * Показываем только в пределах проявленной части (радиус vf·R).
+   */
+  _drawTownStreets(town, vf = 1) {
     if (!town.streets || town.streets.length === 0) return;
     const ctx = this.ctx;
     const s = this.scale;
+    const visR2 = (vf * (town.radius || 1)) ** 2;
     ctx.strokeStyle = COLORS.STREET;
-    ctx.lineWidth = 1.3;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.beginPath();
-    for (const line of town.streets) {
-      if (line.length < 2) continue;
-      ctx.moveTo(line[0][0] * s, line[0][1] * s);
-      for (let i = 1; i < line.length; i++) ctx.lineTo(line[i][0] * s, line[i][1] * s);
+
+    for (const pass of [true, false]) {
+      ctx.lineWidth = pass ? 2.4 : 1.2; // сначала проспекты, затем обычные улицы
+      ctx.beginPath();
+      for (const street of town.streets) {
+        if (!!street.major !== pass) continue;
+        const pts = street.pts || street; // поддержка старого формата
+        let started = false;
+        for (let i = 0; i < pts.length; i++) {
+          const dx = pts[i][0] - town.x;
+          const dy = pts[i][1] - town.y;
+          if (dx * dx + dy * dy <= visR2) {
+            if (!started) { ctx.moveTo(pts[i][0] * s, pts[i][1] * s); started = true; }
+            else ctx.lineTo(pts[i][0] * s, pts[i][1] * s);
+          } else {
+            started = false;
+          }
+        }
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
   }
 
-  /* Здания — повёрнутые прямоугольники; цвет зависит от типа и слегка варьируется. */
-  _drawTownBuildings(town) {
+  /*
+   * Здания — повёрнутые прямоугольники. Показываем только «проявленные» (b.dc ≤
+   * vf), а промышленные корпуса — лишь когда пункт уже индустриализирован.
+   */
+  _drawTownBuildings(town, vf = 1, industry = 1) {
     if (!town.buildings) return;
     const ctx = this.ctx;
     const s = this.scale;
     for (const b of town.buildings) {
+      if (b.dc != null && b.dc > vf) continue;
+      if (b.kind === "industrial" && industry <= 0) continue;
       const w = b.w * s;
       const h = b.h * s;
       ctx.save();
@@ -477,22 +755,27 @@ class MapRenderer {
     }
   }
 
-  /* Цвет здания: базовый по типу + лёгкий разброс яркости (tone) для текстуры. */
+  /*
+   * Цвет здания: светло-серые тона, как на городских картах. Жилые — светлее с
+   * лёгким разбросом, гражданские — чуть темнее (выделяются), промышленные —
+   * светло-серые корпуса.
+   */
   _buildingColor(b) {
-    if (b.kind === "industrial") return COLORS.INDUSTRIAL;
-    if (b.kind === "civic") return COLORS.CIVIC;
-    const g = Math.round(63 + (b.tone || 0) * 25); // 63..88
+    if (b.kind === "industrial") return "#a7adb5";
+    if (b.kind === "civic") return "#7f8893";
+    const g = Math.round(120 + (b.tone || 0) * 45); // 120..165 — жилые
     return `rgb(${g}, ${g}, ${g})`;
   }
 
   /* Отметка-точка в центре мелких пунктов (деревня/село), чтобы их было видно. */
-  _drawTownMarker(town) {
-    if ((town.tier || 0) > 1) return;
+  _drawTownMarker(town, tier) {
+    const t = tier != null ? tier : (town.tier || 0);
+    if (t > 1) return;
     const ctx = this.ctx;
     const s = this.scale;
     ctx.fillStyle = COLORS.TOWN_MARKER;
     ctx.beginPath();
-    ctx.arc(town.x * s, town.y * s, town.tier === 1 ? 2.2 : 1.6, 0, Math.PI * 2);
+    ctx.arc(town.x * s, town.y * s, t === 1 ? 2.2 : 1.6, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -501,13 +784,15 @@ class MapRenderer {
    * крупно), города и мегаполисы — ЗАГЛАВНЫМИ. Под названием у посёлков и
    * крупнее — мелкая подпись вида («город», «мегаполис»…).
    */
-  _drawTownLabel(town) {
+  _drawTownLabel(town, tierArg, vf = 1) {
     const ctx = this.ctx;
     const s = this.scale;
-    const def = SETTLEMENT_TIERS[town.tier || 1] || SETTLEMENT_TIERS[1];
-    const tier = town.tier || 0;
+    const tier = tierArg != null ? tierArg : (town.tier || 0);
+    const def = SETTLEMENT_TIERS[tier] || SETTLEMENT_TIERS[1];
     const cx = town.x * s;
-    const cy = town.y * s - (town.radius || 4) * s - 4;
+    // подпись над «проявленной» застройкой (радиус растёт с населением)
+    const visR = Math.max(vf * (town.radius || 4), 3);
+    const cy = town.y * s - visR * s - 4;
 
     const fs = Math.max(9, Math.round(12 * (def.labelScale || 1)));
     let text = town.name;
@@ -521,9 +806,9 @@ class MapRenderer {
       ctx.textBaseline = "bottom";
       ctx.lineWidth = 2.4;
       ctx.strokeStyle = COLORS.TOWN_HALO;
-      ctx.strokeText(town.kindLabel, cx, cy - fs - 1);
+      ctx.strokeText(def.label, cx, cy - fs - 1);
       ctx.fillStyle = COLORS.TOWN_KIND;
-      ctx.fillText(town.kindLabel, cx, cy - fs - 1);
+      ctx.fillText(def.label, cx, cy - fs - 1);
     }
 
     ctx.font = `bold ${fs}px 'Segoe UI', sans-serif`;

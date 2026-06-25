@@ -33,16 +33,33 @@ const ROAD_CLASS = {
  * Виды населённых пунктов — от деревни до мегаполиса.
  * Каждый вид (tier, «ранг» 0..4) задаёт свой размер, плотность застройки,
  * число главных улиц, долю гражданских/промышленных зданий и стиль названия.
- *   radiusFrac — охват пункта как доля размера карты (чтобы масштаб не «плыл»
- *                при смене разрешения).
+ *   radiusKm — РЕАЛЬНЫЙ радиус застройки в километрах (деревня ~0.35 км,
+ *              мегаполис ~9 км). На карте он переводится в клетки по масштабу,
+ *              поэтому на регионе в сотню км города выглядят пропорционально.
+ *   minKm    — минимальный реальный интервал до соседних пунктов (км).
  */
 const SETTLEMENT_TIERS = [
-  { key: "hamlet",     label: "деревня",   radiusFrac: 0.014, density: 0.50, branchMul: 0.5, civic: 0.04, industrial: 0.00, grid: false, mainRoads: 1, labelScale: 0.80 },
-  { key: "village",    label: "село",      radiusFrac: 0.022, density: 0.66, branchMul: 0.8, civic: 0.12, industrial: 0.05, grid: false, mainRoads: 2, labelScale: 0.95 },
-  { key: "town",       label: "посёлок",   radiusFrac: 0.035, density: 0.82, branchMul: 1.0, civic: 0.22, industrial: 0.12, grid: false, mainRoads: 2, labelScale: 1.12 },
-  { key: "city",       label: "город",     radiusFrac: 0.053, density: 0.92, branchMul: 1.3, civic: 0.32, industrial: 0.20, grid: true,  mainRoads: 3, labelScale: 1.34 },
-  { key: "metropolis", label: "мегаполис", radiusFrac: 0.080, density: 1.00, branchMul: 1.6, civic: 0.42, industrial: 0.28, grid: true,  mainRoads: 4, labelScale: 1.62 },
+  { key: "hamlet",     label: "деревня",   radiusKm: 0.30, minKm: 1.5,  density: 0.50, branchMul: 0.5, civic: 0.04, industrial: 0.00, grid: false, mainRoads: 1, labelScale: 0.80 },
+  { key: "village",    label: "село",      radiusKm: 0.60, minKm: 3.0,  density: 0.66, branchMul: 0.8, civic: 0.12, industrial: 0.05, grid: false, mainRoads: 2, labelScale: 0.95 },
+  { key: "town",       label: "посёлок",   radiusKm: 1.10, minKm: 6.0,  density: 0.82, branchMul: 1.0, civic: 0.22, industrial: 0.12, grid: false, mainRoads: 2, labelScale: 1.12 },
+  { key: "city",       label: "город",     radiusKm: 2.20, minKm: 11.0, density: 0.92, branchMul: 1.3, civic: 0.32, industrial: 0.20, grid: true,  mainRoads: 3, labelScale: 1.34 },
+  { key: "metropolis", label: "мегаполис", radiusKm: 4.50, minKm: 16.0, density: 1.00, branchMul: 1.6, civic: 0.42, industrial: 0.28, grid: true,  mainRoads: 4, labelScale: 1.62 },
 ];
+
+/*
+ * Виды ресурсов. У каждого — «родная» местность (где встречается), вклад в
+ * РОСТ населения (богатство) и в ИНДУСТРИЮ. Руда+уголь или нефть запускают
+ * индустриализацию; золото/нефть быстро обогащают; лес/камень — стройматериал.
+ */
+const RESOURCE_TYPES = [
+  { key: "wood",  label: "Лес",    terrain: "forest", growth: 0.18, industry: 0.05 },
+  { key: "stone", label: "Камень", terrain: "hill",   growth: 0.10, industry: 0.15 },
+  { key: "coal",  label: "Уголь",  terrain: "hill",   growth: 0.08, industry: 0.45 },
+  { key: "iron",  label: "Руда",   terrain: "hill",   growth: 0.08, industry: 0.55 },
+  { key: "gold",  label: "Золото", terrain: "hill",   growth: 0.32, industry: 0.00 },
+  { key: "oil",   label: "Нефть",  terrain: "low",    growth: 0.26, industry: 0.60 },
+];
+const RESOURCE_BY_KEY = Object.fromEntries(RESOURCE_TYPES.map((r) => [r.key, r]));
 
 /*
  * Двоичная куча (min-heap) — очередь с приоритетом для алгоритма A*.
@@ -109,6 +126,20 @@ class MapGenerator {
     this.seaLevel = options.seaLevel;
     this.forestAmount = options.forest;
     this.townCount = options.townCount;
+
+    // Реальный масштаб мира: сторона региона в километрах. Отсюда — размер
+    // клетки в км. Благодаря этому размеры пунктов задаются в реальных км, и
+    // на большом по охвату регионе города выглядят пропорционально мелкими.
+    this.scaleKm = options.scaleKm || 120;
+    this.cellKm = this.scaleKm / this.size;
+
+    // Высшая точка рельефа над уровнем моря (м) — для отметок высот и реализма.
+    // Берём детерминированно от сида, чтобы у разных карт были разные «горы».
+    this.maxElevM = 450 + (this.seed % 6) * 80; // 450..850 м
+
+    // Экономика: сколько точек ресурсов на карте и сколько «лет» развития.
+    this.resourceCount = options.resourceCount != null ? options.resourceCount : 10;
+    this.simYears = options.simYears != null ? options.simYears : 72;
 
     // Два независимых шума: один для высот, другой для влажности (распределение леса).
     this.heightNoise = new Noise(options.seed);
@@ -178,34 +209,250 @@ class MapGenerator {
     //    размещения/застройки городов (не строим на круче).
     const slope = this._computeSlope(height);
 
-    // 5) Населённые пункты и их виды (деревня…мегаполис)
-    const towns = this._placeTowns(height, slope, type);
+    // 5) Заметные вершины с отметками высот (как на топокартах).
+    const peaks = this._findPeaks(height);
 
-    // 6) Сеть дорог с учётом рельефа (поиск пути A* по «стоимости» местности)
+    // 6) Точки ресурсов (нефть/лес/золото/руда…) — основа будущей экономики.
+    const resources = this._placeResources(height, type);
+
+    // 7) Зачатки населённых пунктов (без заранее заданного «вида» — он вырастет
+    //    из экономики). Ставим на хороших местах: равнина, вода, рядом ресурсы.
+    const seeds = this._placeSeeds(height, slope, type, resources);
+
+    // 8) СИМУЛЯЦИЯ развития: пункты растут, тянут дороги к ресурсам, строят
+    //    шахты, торгуют и индустриализируются. Дороги и шахты появляются во
+    //    времени, «вид» пункта определяется итоговым населением.
     const cost = this._buildCostField(height, slope, type);
-    const roads = this._buildRoadNetwork(towns, cost, height, size);
+    const sim = new WorldSim(this, { resources, seeds, cost, height, ticks: this.simYears }).run();
 
-    // 7) Запоминаем, с каких направлений в город входят трассы — чтобы главные
-    //    улицы стыковались с магистралями, а не торчали в случайные стороны.
-    this._collectIncomingRoads(towns, roads);
-
-    // 8) Детальная застройка каждого пункта (дома, улицы, кварталы) — с учётом вида
+    // 9) Превращаем итог симуляции в модель пунктов (вид по населению, имена) и
+    //    строим детальную застройку под итоговый вид. Для анимации роста у
+    //    каждого здания запоминаем относительное удаление от центра (dc).
+    const towns = this._finalizeTowns(sim.settlements);
+    this._collectIncomingRoadsSim(towns, sim.roads);
     const builder = new TownBuilder(this.seed);
     for (const town of towns) {
       builder.build(town, { type, size, slope, height });
+      if (town.buildings) {
+        for (const b of town.buildings) {
+          b.dc = Math.hypot(b.x - town.x, b.y - town.y) / (town.radius || 1);
+        }
+      }
     }
 
     return {
       size,
       seaLevel: this.seaLevel,
+      scaleKm: this.scaleKm,
+      cellKm: this.cellKm,
+      maxElevM: this.maxElevM,
       height,
       moisture,
       type,
       slope,
       rivers,
       towns,
-      roads,
+      roads: sim.roads,
+      resources: sim.resources,
+      ticks: sim.ticks,
+      history: sim.history,
+      peaks,
     };
+  }
+
+  /*
+   * Находит несколько заметных вершин: локальные максимумы рельефа на высоте,
+   * разнесённые друг от друга. Для каждой считаем высоту над уровнем моря в
+   * метрах (по maxElevM) — её и подпишет renderer, как на настоящих картах.
+   */
+  _findPeaks(height) {
+    const size = this.size;
+    const R = Math.max(2, Math.round(size * 0.014));
+    const candidates = [];
+    for (let y = R; y < size - R; y += 2) {
+      for (let x = R; x < size - R; x += 2) {
+        const h = height[y * size + x];
+        if (h < 0.72) continue; // только высокое
+        let isMax = true;
+        for (let a = 0; a < 8 && isMax; a++) {
+          const ang = (a / 8) * Math.PI * 2;
+          const nx = Math.round(x + Math.cos(ang) * R);
+          const ny = Math.round(y + Math.sin(ang) * R);
+          if (height[ny * size + nx] > h) isMax = false;
+        }
+        if (isMax) candidates.push({ x, y, h });
+      }
+    }
+    candidates.sort((a, b) => b.h - a.h);
+
+    const peaks = [];
+    const want = 3 + Math.round(size / 220);
+    const minSpacing = size * 0.13;
+    const minSpacing2 = minSpacing * minSpacing;
+    for (const c of candidates) {
+      if (peaks.length >= want) break;
+      let ok = true;
+      for (const p of peaks) {
+        const dx = p.x - c.x;
+        const dy = p.y - c.y;
+        if (dx * dx + dy * dy < minSpacing2) { ok = false; break; }
+      }
+      if (!ok) continue;
+      const above = (c.h - this.seaLevel) / (1 - this.seaLevel); // 0..1 над морем
+      const elevM = Math.round((above * this.maxElevM) / 10) * 10; // до десятков м
+      peaks.push({ x: c.x, y: c.y, elevM });
+    }
+    return peaks;
+  }
+
+  /* Назначает имена всем пунктам (отдельным проходом, без влияния на геометрию). */
+  _nameTowns(towns) {
+    for (let i = 0; i < towns.length; i++) {
+      towns[i].name = this._settlementName(towns[i].tier, i);
+    }
+  }
+
+  /*
+   * Расставляет точки ресурсов по «родной» местности каждого вида (лес — в
+   * лесу, руда/уголь/золото/камень — в горах, нефть — в низине у воды), не
+   * слишком кучно. Количество — из настроек, богатство (amount) — случайное.
+   */
+  _placeResources(height, type) {
+    const size = this.size;
+    const count = this.resourceCount;
+    const margin = Math.round(size * 0.03);
+    const minDist = size * 0.05;
+    const minDist2 = minDist * minDist;
+    const res = [];
+    let attempts = 0;
+    const maxAttempts = count * 400;
+    while (res.length < count && attempts < maxAttempts) {
+      attempts++;
+      const rt = RESOURCE_TYPES[Math.floor(this._rand() * RESOURCE_TYPES.length)];
+      const x = margin + Math.floor(this._rand() * (size - 2 * margin));
+      const y = margin + Math.floor(this._rand() * (size - 2 * margin));
+      const i = y * size + x;
+      if (!this._resourceFits(rt, type[i], height[i])) continue;
+      let tooClose = false;
+      for (const r of res) {
+        const dx = r.x - x;
+        const dy = r.y - y;
+        if (dx * dx + dy * dy < minDist2) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      res.push({
+        id: res.length,
+        x, y,
+        type: rt.key,
+        label: rt.label,
+        amount: 1 + Math.floor(this._rand() * 3), // богатство 1..3
+        state: "raw",   // raw → mine (после постройки шахты)
+        owner: -1,
+        mineTick: -1,
+      });
+    }
+    return res;
+  }
+
+  /* Подходит ли клетка под ресурс данного вида. */
+  _resourceFits(rt, t, h) {
+    if (t === TERRAIN.WATER) return false;
+    if (rt.terrain === "forest") return t === TERRAIN.FOREST;
+    if (rt.terrain === "hill") return t === TERRAIN.HILL || h > 0.7;
+    if (rt.terrain === "low") return (t === TERRAIN.FIELD || t === TERRAIN.SAND) && h < this.seaLevel + 0.2;
+    return true;
+  }
+
+  /*
+   * Зачатки населённых пунктов: N мест на суше, на ровном, с интервалом. «Вид»
+   * не назначаем — он вырастет в симуляции. Пригодность учитывает близость к
+   * воде/ресурсам, поэтому пункты тяготеют к удобным и богатым местам.
+   */
+  _placeSeeds(height, slope, type, resources) {
+    const size = this.size;
+    const margin = Math.round(size * 0.045);
+    const minDist = Math.max(size * 0.035, size / (this.townCount + 3));
+    const minDist2 = minDist * minDist;
+    const seeds = [];
+    let attempts = 0;
+    const maxAttempts = this.townCount * 500;
+    while (seeds.length < this.townCount && attempts < maxAttempts) {
+      attempts++;
+      const x = margin + Math.floor(this._rand() * (size - 2 * margin));
+      const y = margin + Math.floor(this._rand() * (size - 2 * margin));
+      const i = y * size + x;
+      const t = type[i];
+      if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
+      if (slope[i] > 0.05) continue;
+      let tooClose = false;
+      for (const s of seeds) {
+        const dx = s.x - x;
+        const dy = s.y - y;
+        if (dx * dx + dy * dy < minDist2) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      seeds.push({ x, y, suit: this._seedSuit(height, slope, type, resources, x, y) });
+    }
+    return seeds;
+  }
+
+  /* Пригодность места для зачатка: базовая (равнина/вода/центр) + близость к ресурсам. */
+  _seedSuit(height, slope, type, resources, x, y) {
+    let s = this._suitability(height, slope, type, x, y);
+    let rb = 0;
+    const R = this.size * 0.12;
+    for (const r of resources) {
+      const d = Math.hypot(r.x - x, r.y - y);
+      if (d < R) rb += 0.08 * (1 - d / R);
+    }
+    return Math.min(1, s + Math.min(rb, 0.25));
+  }
+
+  /*
+   * Превращает итог симуляции в список town-объектов: «вид» по итоговому
+   * населению, радиус застройки по виду, имя. Порядок совпадает с порядком
+   * пунктов в симуляции (towns[id] ↔ history[t][id]).
+   */
+  _finalizeTowns(settlements) {
+    const towns = [];
+    for (const s of settlements) {
+      const tier = s.tier;
+      const def = SETTLEMENT_TIERS[tier];
+      towns.push({
+        id: s.id,
+        x: s.x,
+        y: s.y,
+        tier,
+        kind: def.key,
+        kindLabel: def.label,
+        radius: Math.max(4, (def.radiusKm / this.cellKm) * (0.85 + this._rand() * 0.3)),
+        size: 0.4 + tier * 0.18,
+        industry: s.industry,
+        foundTick: s.foundTick,
+        pop: Math.round(s.pop),
+      });
+    }
+    this._nameTowns(towns);
+    return towns;
+  }
+
+  /* Углы входящих дорог (для стыковки улиц) — из дорог симуляции. */
+  _collectIncomingRoadsSim(towns, roads) {
+    const byId = new Map(towns.map((t) => [t.id, t]));
+    for (const t of towns) t.incoming = [];
+    for (const r of roads) {
+      const p = r.path;
+      if (!p || p.length < 2) continue;
+      const a = byId.get(r.from);
+      if (a) a.incoming.push(Math.atan2(p[1][1] - a.y, p[1][0] - a.x));
+      if (r.to !== undefined) {
+        const b = byId.get(r.to);
+        if (b) {
+          const pen = p[p.length - 2];
+          b.incoming.push(Math.atan2(pen[1] - b.y, pen[0] - b.x));
+        }
+      }
+    }
   }
 
   /*
@@ -645,7 +892,7 @@ class MapGenerator {
     // затем сёла и деревни заполняют промежутки. Это и даёт «иерархию» расселения.
     const towns = [];
     for (let tier = SETTLEMENT_TIERS.length - 1; tier >= 0; tier--) {
-      const tierRadius = SETTLEMENT_TIERS[tier].radiusFrac * size;
+      const tierRadius = SETTLEMENT_TIERS[tier].radiusKm / this.cellKm;
       for (let k = 0; k < counts[tier]; k++) {
         const town = this._placeOne(height, slope, type, towns, tier, tierRadius, margin);
         if (town) towns.push(town);
@@ -680,10 +927,18 @@ class MapGenerator {
     const size = this.size;
     const span = size - 2 * margin;
     const def = SETTLEMENT_TIERS[tier];
+    const cellKm = this.cellKm;
 
-    const spaced = (x, y, factor) => {
+    // Интервал между пунктами — по реальным расстояниям (км): крупные города
+    // держим дальше друг от друга. useFloor=false ослабляет требование на
+    // запасном проходе, чтобы всё-таки разместить пункт на тесной карте.
+    const spaced = (x, y, factor, useFloor) => {
       for (const tw of existing) {
-        const need = (tierRadius + tw._radiusCells) * factor + size * 0.02;
+        let need = (tierRadius + tw._radiusCells) * factor;
+        if (useFloor) {
+          const floorKm = Math.max(def.minKm, SETTLEMENT_TIERS[tw.tier].minKm);
+          need = Math.max(need, floorKm / cellKm);
+        }
         const dx = tw.x - x;
         const dy = tw.y - y;
         if (dx * dx + dy * dy < need * need) return false;
@@ -701,7 +956,7 @@ class MapGenerator {
       const t = type[i];
       if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
       if (slope[i] > 0.05) continue;
-      if (!spaced(x, y, 1.25)) continue;
+      if (!spaced(x, y, 1.1, true)) continue;
       const suit = this._suitability(height, slope, type, x, y);
       if (suit > bestScore) { bestScore = suit; best = { x, y }; }
     }
@@ -713,7 +968,7 @@ class MapGenerator {
         const y = margin + Math.floor(this._rand() * span);
         const t = type[y * size + x];
         if (t === TERRAIN.WATER || t === TERRAIN.HILL) continue;
-        if (!spaced(x, y, 0.85)) continue;
+        if (!spaced(x, y, 0.8, false)) continue;
         best = { x, y };
       }
     }
@@ -726,7 +981,6 @@ class MapGenerator {
     best.radius = Math.max(4, tierRadius * (0.85 + this._rand() * 0.3));
     best.size = 0.4 + tier * 0.18; // обратная совместимость со старым полем
     best.suit = bestScore;
-    best.name = this._settlementName(tier, existing.length);
     return best;
   }
 
@@ -765,33 +1019,54 @@ class MapGenerator {
   }
 
   /*
-   * Генерация русскоязычного названия в зависимости от вида пункта:
-   * города — на -ск/-град/-горск, посёлки — на -ово/-поль, сёла и деревни —
-   * на -овка/-ино/-ки. Следим, чтобы названия не повторялись.
+   * Название пункта берём из готовых списков реальных русских топонимов,
+   * подобранных по «весу» пункта: деревни и сёла — простые «деревенские»
+   * имена, посёлки — посолиднее, города и мегаполисы — «городские» (-ск,
+   * -горск, -град…). Готовые списки надёжнее «склейки» корня и суффикса,
+   * которая порождала корявые формы вроде «Журавлный». Имена не повторяются.
    */
   _settlementName(tier, salt) {
-    const roots = [
-      "Дуб", "Берёз", "Камен", "Сосн", "Ольх", "Лип", "Клён", "Вишн", "Ясен",
-      "Озёр", "Луг", "Холм", "Бор", "Тих", "Бел", "Красн", "Чёрн", "Зелен",
-      "Север", "Гор", "Стар", "Нов", "Велик", "Мал", "Песч", "Глин", "Соль",
-      "Рыб", "Медвеж", "Волч", "Журавл", "Соколь", "Вербн", "Ивн", "Топол",
-      "Гранит", "Кремн", "Полев", "Заречь", "Покров",
+    // Деревни и сёла (tier 0–1)
+    const small = [
+      "Берёзовка", "Дубовка", "Ивановка", "Петровка", "Сосновка", "Малиновка",
+      "Вишнёвка", "Ольховка", "Калиновка", "Кленовка", "Грушёвка", "Ореховка",
+      "Липовка", "Рябиновка", "Журавлёвка", "Соколовка", "Медведевка",
+      "Лебедёвка", "Бобровка", "Гремячье", "Заречное", "Подлесное", "Каменка",
+      "Песчаное", "Тихоновка", "Боровое", "Луговое", "Ключи", "Студёное",
+      "Ягодное", "Вязовка", "Осиновка", "Берёзники", "Дубки", "Ельники",
+      "Зайцево", "Лужки", "Сухарево", "Гречихино", "Михайловка",
     ];
-    let suf;
-    if (tier >= 3) suf = ["ск", "град", "горск", "поль", "бург"];
-    else if (tier === 2) suf = ["ово", "поль", "ный", "инск", "овск"];
-    else suf = ["овка", "инка", "ино", "ёвка", "ки", "евка"];
+    // Посёлки (tier 2)
+    const mid = [
+      "Берёзово", "Заречье", "Подгорное", "Лесной", "Озёрный", "Сосновое",
+      "Краснополье", "Светлое", "Новосёлово", "Старогорье", "Дубровка",
+      "Высокое", "Раздольное", "Привольное", "Боровское", "Тихоречье",
+      "Каменное", "Песчанское", "Зелёный Бор", "Сосновый Бор", "Михайловское",
+      "Никольское", "Спасское", "Троицкое", "Покровское", "Луговское",
+      "Озёрное", "Горное", "Красный Луг", "Майское",
+    ];
+    // Города и мегаполисы (tier 3–4)
+    const big = [
+      "Каменск", "Северск", "Белогорск", "Зеленоград", "Краснобор",
+      "Высокогорск", "Железногорск", "Светлоград", "Приморск", "Сосновоборск",
+      "Новокаменск", "Старобельск", "Верхнеуральск", "Нижнегорск", "Озёрск",
+      "Боровск", "Лесогорск", "Краснокамск", "Среднегорск", "Дальнегорск",
+      "Зареченск", "Великогорск", "Камышин", "Углегорск", "Белореченск",
+      "Южноморск", "Горнозаводск", "Северодвинск", "Краснодар", "Заволжск",
+    ];
+    const pool = tier >= 3 ? big : tier === 2 ? mid : small;
 
     if (!this._usedNames) this._usedNames = new Set();
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const root = roots[Math.floor(this._rand() * roots.length)];
-      const s = suf[Math.floor(this._rand() * suf.length)];
-      const name = root + s;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const name = pool[Math.floor(this._rand() * pool.length)];
       if (!this._usedNames.has(name)) { this._usedNames.add(name); return name; }
     }
-    // Запасной вариант — гарантированно уникальный.
-    const fallback = roots[salt % roots.length] + (tier >= 3 ? "ск" : "овка") + "-" + (salt + 1);
-    this._usedNames.add(fallback);
-    return fallback;
+    // Если список исчерпан — добавляем номер (как район большого города).
+    const base = pool[salt % pool.length];
+    let n = 2;
+    let name = `${base}-${n}`;
+    while (this._usedNames.has(name)) { n++; name = `${base}-${n}`; }
+    this._usedNames.add(name);
+    return name;
   }
 }
