@@ -5,11 +5,10 @@
  * территорию на КВАРТАЛЫ, а уже внутри кварталов застройка идёт по периметру
  * (дома фасадами на улицу, внутри — двор). Часть кварталов — ПАРКИ/скверы.
  *
- *   - улицы образуют сетку (с лёгкой неровностью и главными «проспектами»);
- *   - квартал застраивается по периметру (жильё) либо одним крупным зданием
- *     (гражданское/промышленное); часть кварталов — зелёные парки;
- *   - зонирование: центр (гражданские здания, площадь), жильё, промзона на
- *     окраине; чем дальше от центра — тем больше парков и реже застройка.
+ * Чтобы город не выглядел одной ровной решёткой, он делится на РАЙОНЫ с разным
+ * углом сетки (исторический центр и более новые окраины повёрнуты по-разному),
+ * а парки бывают как маленькими сквериками, так и крупными (в несколько
+ * кварталов).
  *
  * Координаты — в «клетках» сетки карты. Всё детерминировано: один и тот же
  * пункт (координаты + сид) застраивается одинаково.
@@ -37,7 +36,7 @@ class TownBuilder {
     return [2, 3, 5, 8, 11][tier] || 4;
   }
 
-  /* Локальные координаты (u вдоль оси города, v поперёк) → мировые клетки. */
+  /* Локальные координаты (u вдоль оси района, v поперёк) → мировые клетки. */
   _toWorld(f, u, v) {
     return [f.cx + u * f.ca - v * f.sa, f.cy + u * f.sa + v * f.ca];
   }
@@ -66,73 +65,149 @@ class TownBuilder {
     const R = town.radius || 5 + (town.size || 0.6) * 9;
     town.radius = R;
     town.squareR = tier >= 2 ? R * 0.14 : 0; // центральная площадь у посёлков+
+    town.angle = town.incoming && town.incoming.length ? town.incoming[0] : rng() * Math.PI;
 
-    const ang = town.incoming && town.incoming.length ? town.incoming[0] : rng() * Math.PI;
-    town.angle = ang;
-    const f = { cx: town.x, cy: town.y, ca: Math.cos(ang), sa: Math.sin(ang), R };
+    const indDir = rng() * Math.PI * 2; // сектор промзоны
+    const cell = (2 * R) / this._blocksPerAxis(tier);
 
-    const N = this._blocksPerAxis(tier);
-    const cell = (2 * R) / N; // размер квартала в клетках
+    // Крупные парки (в несколько кварталов): пара «зелёных зон» по городу.
+    const parkZones = [];
+    if (tier >= 2) {
+      const nz = tier >= 3 ? 1 + Math.floor(rng() * 2) : 1;
+      for (let k = 0; k < nz; k++) {
+        const a = rng() * Math.PI * 2;
+        const rr = R * (0.3 + rng() * 0.45);
+        parkZones.push({ x: town.x + Math.cos(a) * rr, y: town.y + Math.sin(a) * rr, r: cell * (1.0 + rng() * 1.1) });
+      }
+    }
+
+    // Районы с разным углом сетки: ядро + окраины (у крупных пунктов).
+    const districts = this._districts(town, tier, R, rng);
+
+    const streets = [];
+    const buildings = [];
+    const parks = [];
+    const placed = [];
+    for (const d of districts) {
+      this._buildDistrict(town, d, def, rng, indDir, grid, parkZones, streets, buildings, parks, placed);
+    }
+
+    // Относительное удаление от центра (для «прорастания» при анимации роста).
+    for (const b of buildings) b.dc = Math.hypot(b.x - town.x, b.y - town.y) / R;
+    town.streets = streets;
+    town.buildings = buildings;
+    town.parks = parks;
+  }
+
+  /*
+   * Районы города. У посёлков+ — два района с разным углом сетки: компактное
+   * ядро и повёрнутые относительно него окраины (как центр и новые кварталы).
+   */
+  _districts(town, tier, R, rng) {
+    const a = town.angle;
+    if (tier < 2) return [{ angle: a, rMin: 0, rMax: R * 1.02 }];
+    const coreEdge = R * (0.4 + rng() * 0.1);
+    const turn = (0.35 + rng() * 0.5) * (rng() < 0.5 ? 1 : -1); // поворот окраин, ~20–50°
+    return [
+      { angle: a + turn, rMin: coreEdge, rMax: R * 1.02 }, // окраины — рисуем первыми
+      { angle: a, rMin: 0, rMax: coreEdge },               // ядро — поверх
+    ];
+  }
+
+  /* Застраивает один район (кольцо радиусов [rMin,rMax)) своей сеткой. */
+  _buildDistrict(town, d, def, rng, indDir, grid, parkZones, streets, buildings, parks, placed) {
+    const R = town.radius;
+    const f = { cx: town.x, cy: town.y, ca: Math.cos(d.angle), sa: Math.sin(d.angle), R };
+    const N = this._blocksPerAxis(town.tier | 0);
+    const cell = (2 * R) / N;
     f.cell = cell;
     const U = this._gridPositions(N, R, rng);
     const V = this._gridPositions(N, R, rng);
 
-    // --- Улицы: линии сетки, обрезанные по кругу города. Центральные — главные. ---
-    const streets = [];
+    // Улицы района: линии сетки, обрезанные по кольцу [rMin,rMax]. Центральные —
+    // главные «проспекты».
     const midU = Math.round(N / 2);
     const midV = Math.round(N / 2);
     for (let i = 0; i <= N; i++) {
       const u = U[i];
       if (Math.abs(u) >= R) continue;
-      const vm = Math.sqrt(Math.max(0, R * R - u * u));
-      streets.push({ pts: [this._toWorld(f, u, -vm), this._toWorld(f, u, vm)], major: i === midU });
+      const vm = Math.sqrt(R * R - u * u);
+      const p0 = this._toWorld(f, u, -vm);
+      const p1 = this._toWorld(f, u, vm);
+      for (const seg of this._clipToBand(p0, p1, town.x, town.y, d.rMin, d.rMax)) {
+        streets.push({ pts: seg, major: i === midU });
+      }
     }
     for (let j = 0; j <= N; j++) {
       const v = V[j];
       if (Math.abs(v) >= R) continue;
-      const um = Math.sqrt(Math.max(0, R * R - v * v));
-      streets.push({ pts: [this._toWorld(f, -um, v), this._toWorld(f, um, v)], major: j === midV });
-    }
-    town.streets = streets;
-
-    // --- Кварталы ---
-    const indDir = rng() * Math.PI * 2; // сектор промзоны
-    const buildings = [];
-    const parks = [];
-    const placed = [];
-    for (let i = 0; i < N; i++) {
-      for (let j = 0; j < N; j++) {
-        this._buildBlock(f, U[i], U[i + 1], V[j], V[j + 1], town, def, rng, indDir, grid, buildings, parks, placed);
+      const um = Math.sqrt(R * R - v * v);
+      const p0 = this._toWorld(f, -um, v);
+      const p1 = this._toWorld(f, um, v);
+      for (const seg of this._clipToBand(p0, p1, town.x, town.y, d.rMin, d.rMax)) {
+        streets.push({ pts: seg, major: j === midV });
       }
     }
 
-    // Относительное удаление от центра (для «прорастания» при анимации роста).
-    for (const b of buildings) b.dc = Math.hypot(b.x - town.x, b.y - town.y) / R;
-    town.buildings = buildings;
-    town.parks = parks;
+    // Кварталы района.
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        this._buildBlock(f, U[i], U[i + 1], V[j], V[j + 1], town, d, def, rng, indDir, grid, parkZones, buildings, parks, placed);
+      }
+    }
+  }
+
+  /* Делит отрезок на под-полилинии, попадающие в кольцо радиусов [rMin,rMax]. */
+  _clipToBand(p0, p1, cx, cy, rMin, rMax) {
+    const segs = [];
+    let cur = null;
+    const M = 28;
+    for (let k = 0; k <= M; k++) {
+      const t = k / M;
+      const x = p0[0] + (p1[0] - p0[0]) * t;
+      const y = p0[1] + (p1[1] - p0[1]) * t;
+      const d = Math.hypot(x - cx, y - cy);
+      if (d >= rMin && d <= rMax) {
+        if (!cur) { cur = []; segs.push(cur); }
+        cur.push([x, y]);
+      } else {
+        cur = null;
+      }
+    }
+    return segs.filter((s) => s.length >= 2);
   }
 
   /* Застраивает один квартал [u0,u1]×[v0,v1] (или делает его парком). */
-  _buildBlock(f, u0, u1, v0, v1, town, def, rng, indDir, grid, buildings, parks, placed) {
+  _buildBlock(f, u0, u1, v0, v1, town, d, def, rng, indDir, grid, parkZones, buildings, parks, placed) {
     const cell = f.cell;
-    const mu = (u0 + u1) / 2;
-    const mv = (v0 + v1) / 2;
-    const c = this._toWorld(f, mu, mv);
+    const c = this._toWorld(f, (u0 + u1) / 2, (v0 + v1) / 2);
     const bx = c[0];
     const by = c[1];
     const dist = Math.hypot(bx - f.cx, by - f.cy);
+    if (dist < d.rMin || dist >= d.rMax) return;       // не наш район
     const dR = dist / f.R;
-    if (dR > 1.02) return;                 // вне круга города
-    if (this._isBlocked(grid, bx, by)) return; // вода/круча
-    if (town.squareR && dist < town.squareR) return; // центральная площадь — открыта
+    if (dR > 1.02) return;
+    if (this._isBlocked(grid, bx, by)) return;
+    if (town.squareR && dist < town.squareR) return;   // центральная площадь — открыта
 
+    const corners = [
+      this._toWorld(f, u0, v0),
+      this._toWorld(f, u1, v0),
+      this._toWorld(f, u1, v1),
+      this._toWorld(f, u0, v1),
+    ];
+
+    // Крупный парк (зелёная зона) или случайный сквер.
+    let bigPark = false;
+    for (const z of parkZones) {
+      if ((bx - z.x) ** 2 + (by - z.y) ** 2 < z.r * z.r) { bigPark = true; break; }
+    }
     const angToC = Math.atan2(by - f.cy, bx - f.cx);
     const industrial =
       def.industrial > 0 && dR > 0.55 &&
       Math.abs(this._angDiff(angToC, indDir)) < 0.7 && rng() < def.industrial * 1.6;
 
-    // Парки: чем дальше от центра, тем чаще зелёные кварталы.
-    if (!industrial && rng() < 0.1 + dR * 0.1) {
+    if (bigPark || (!industrial && rng() < 0.08 + dR * 0.1)) {
       const inset = cell * 0.12;
       parks.push({
         poly: [
@@ -147,22 +222,14 @@ class TownBuilder {
     }
 
     const civic = !industrial && dR < 0.32 && rng() < def.civic;
-    const corners = [
-      this._toWorld(f, u0, v0),
-      this._toWorld(f, u1, v0),
-      this._toWorld(f, u1, v1),
-      this._toWorld(f, u0, v1),
-    ];
-
     if (industrial || (civic && rng() < 0.6)) {
       // Крупное здание (завод / общественный комплекс) почти во весь квартал.
       const w = cell * (0.6 + rng() * 0.18);
       const h = cell * (0.48 + rng() * 0.2);
-      if (this._isBlocked(grid, bx, by)) return;
       const br = 0.5 * Math.hypot(w, h);
       if (this._tooClose(placed, bx, by, br)) return;
       placed.push([bx, by, br]);
-      buildings.push({ x: bx, y: by, w, h, angle: f.ca === 0 ? 0 : Math.atan2(f.sa, f.ca), kind: industrial ? "industrial" : "civic", tone: rng() });
+      buildings.push({ x: bx, y: by, w, h, angle: Math.atan2(f.sa, f.ca), kind: industrial ? "industrial" : "civic", tone: rng() });
     } else {
       this._placePerimeter(corners, bx, by, civic ? "civic" : "house", cell, rng, grid, buildings, placed);
     }
@@ -176,7 +243,7 @@ class TownBuilder {
     const depth = cell * 0.24;       // глубина дома (внутрь квартала)
     const setback = cell * 0.1;      // отступ от линии улицы
     const inset = setback + depth / 2;
-    const margin = cell * 0.16;      // отступ от углов (чтобы дома не налезали)
+    const margin = cell * 0.16;      // отступ от углов
     const wMean = kind === "civic" ? cell * 0.5 : cell * 0.34;
     const edges = [[0, 1], [1, 2], [2, 3], [3, 0]];
 
@@ -188,7 +255,6 @@ class TownBuilder {
       const len = Math.hypot(ex, ey) || 1;
       const dx = ex / len;
       const dy = ey / len;
-      // нормаль внутрь квартала (к центру блока)
       let nx = -dy;
       let ny = dx;
       const mx = (e0[0] + e1[0]) / 2;
@@ -204,8 +270,8 @@ class TownBuilder {
         const t = margin + (k + 0.5) * slot;
         const px = e0[0] + dx * t + nx * inset;
         const py = e0[1] + dy * t + ny * inset;
-        const w = slot * (0.7 + rng() * 0.22); // вдоль улицы
-        const h = depth * (0.8 + rng() * 0.4); // вглубь двора
+        const w = slot * (0.7 + rng() * 0.22);
+        const h = depth * (0.8 + rng() * 0.4);
         if (this._isBlocked(grid, px, py)) continue;
         const br = 0.5 * Math.hypot(w, h);
         if (this._tooClose(placed, px, py, br)) continue;
