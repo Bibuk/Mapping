@@ -34,7 +34,8 @@ const COLORS = {
   // Застройка населённых пунктов
   BUILTUP: "#ece0cf",        // лёгкая заливка пятна застройки
   SQUARE: "#f4eede",         // центральная площадь (открытое место)
-  STREET: "#cfc8b8",         // улицы внутри пункта
+  PARK: "#bfe0a6",           // парки/скверы внутри города
+  STREET: "#f1ede2",         // улицы внутри пункта (светлые, как на картах)
   HOUSE: "#4d4d4d",          // жилые дома
   CIVIC: "#5a4c3f",          // гражданские здания (центр)
   INDUSTRIAL: "#737373",     // промзона
@@ -631,6 +632,7 @@ class MapRenderer {
       // Доля «проявленной» застройки: площадь ∝ населению, поэтому радиус ∝ √pop.
       const vf = Math.min(1, Math.sqrt(st.pop / Math.max(1, town.pop)));
       this._drawBuiltUp(town, vf);
+      this._drawTownParks(town, vf);
       if (st.tier >= 2) this._drawTownSquare(town);
       this._drawTownStreets(town, vf);
       this._drawTownBuildings(town, vf, st.industry);
@@ -676,31 +678,56 @@ class MapRenderer {
     ctx.fill();
   }
 
-  /* Сеть улиц внутри пункта — только в пределах проявленной части (радиус vf·R). */
+  /* Зелёные кварталы-парки внутри города (проявляются по мере роста). */
+  _drawTownParks(town, vf = 1) {
+    if (!town.parks || town.parks.length === 0) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    ctx.fillStyle = COLORS.PARK;
+    for (const p of town.parks) {
+      if (p.dc != null && p.dc > vf) continue;
+      const poly = p.poly;
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0] * s, poly[0][1] * s);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0] * s, poly[i][1] * s);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  /*
+   * Сеть улиц внутри пункта. Главные «проспекты» рисуем шире обычных улиц.
+   * Показываем только в пределах проявленной части (радиус vf·R).
+   */
   _drawTownStreets(town, vf = 1) {
     if (!town.streets || town.streets.length === 0) return;
     const ctx = this.ctx;
     const s = this.scale;
     const visR2 = (vf * (town.radius || 1)) ** 2;
     ctx.strokeStyle = COLORS.STREET;
-    ctx.lineWidth = 1.3;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.beginPath();
-    for (const line of town.streets) {
-      let started = false;
-      for (let i = 0; i < line.length; i++) {
-        const dx = line[i][0] - town.x;
-        const dy = line[i][1] - town.y;
-        if (dx * dx + dy * dy <= visR2) {
-          if (!started) { ctx.moveTo(line[i][0] * s, line[i][1] * s); started = true; }
-          else ctx.lineTo(line[i][0] * s, line[i][1] * s);
-        } else {
-          started = false;
+
+    for (const pass of [true, false]) {
+      ctx.lineWidth = pass ? 2.4 : 1.2; // сначала проспекты, затем обычные улицы
+      ctx.beginPath();
+      for (const street of town.streets) {
+        if (!!street.major !== pass) continue;
+        const pts = street.pts || street; // поддержка старого формата
+        let started = false;
+        for (let i = 0; i < pts.length; i++) {
+          const dx = pts[i][0] - town.x;
+          const dy = pts[i][1] - town.y;
+          if (dx * dx + dy * dy <= visR2) {
+            if (!started) { ctx.moveTo(pts[i][0] * s, pts[i][1] * s); started = true; }
+            else ctx.lineTo(pts[i][0] * s, pts[i][1] * s);
+          } else {
+            started = false;
+          }
         }
       }
+      ctx.stroke();
     }
-    ctx.stroke();
   }
 
   /*
@@ -728,11 +755,15 @@ class MapRenderer {
     }
   }
 
-  /* Цвет здания: базовый по типу + лёгкий разброс яркости (tone) для текстуры. */
+  /*
+   * Цвет здания: светло-серые тона, как на городских картах. Жилые — светлее с
+   * лёгким разбросом, гражданские — чуть темнее (выделяются), промышленные —
+   * светло-серые корпуса.
+   */
   _buildingColor(b) {
-    if (b.kind === "industrial") return COLORS.INDUSTRIAL;
-    if (b.kind === "civic") return COLORS.CIVIC;
-    const g = Math.round(63 + (b.tone || 0) * 25); // 63..88
+    if (b.kind === "industrial") return "#a7adb5";
+    if (b.kind === "civic") return "#7f8893";
+    const g = Math.round(120 + (b.tone || 0) * 45); // 120..165 — жилые
     return `rgb(${g}, ${g}, ${g})`;
   }
 
