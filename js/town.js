@@ -65,9 +65,11 @@ class TownBuilder {
       this._addGrid(roads, town, baseR, dirs[0], rng);
       this._addRing(roads, town, baseR * 0.62, rng);
     }
-    // Второстепенные ответвления — чем крупнее пункт, тем их больше.
-    const branches = Math.round((3 + tier * 4) * def.branchMul);
-    for (let i = 0; i < branches; i++) this._addBranch(roads, town, baseR, rng);
+    // Связующие улицы: соединяют точки РАЗНЫХ улиц между собой, образуя единую
+    // дорожную сеть без «тупиков в поле». Через главные улицы (а те — через
+    // центр) сеть выходит на въездные трассы — улицы реально куда-то ведут.
+    const connectors = Math.round((3 + tier * 4) * def.branchMul);
+    this._addConnectors(roads, town, baseR, rng, connectors);
     town.streets = roads;
 
     // --- Застройка вдоль улиц ---
@@ -172,32 +174,62 @@ class TownBuilder {
   }
 
   /*
-   * Второстепенная улица: ответвляется от случайной точки одной из главных
-   * дорог и уходит наружу (к окраине) под случайным углом, с лёгким изгибом.
+   * Связующие улицы. Берём точки уже существующих улиц и соединяем точку с
+   * ОДНОЙ улицы с точкой ДРУГОЙ (в разумном диапазоне длины). Так получается
+   * единая связная сеть с кварталами, без оборванных «улиц в никуда». Середины
+   * новых улиц тоже становятся узлами — сеть может ветвиться от них дальше.
    */
-  _addBranch(roads, town, baseR, rng) {
-    const base = roads[Math.floor(rng() * Math.min(roads.length, 2))];
-    if (!base || base.length < 3) return;
-    const p = base[1 + Math.floor(rng() * (base.length - 2))];
+  _addConnectors(roads, town, baseR, rng, count) {
+    const nodes = this._streetNodes(roads);
+    if (nodes.length < 2) return;
+    const min2 = (baseR * 0.18) ** 2;
+    const max2 = (baseR * 0.75) ** 2;
 
-    let dirX = p[0] - town.x;
-    let dirY = p[1] - town.y;
-    const dl = Math.hypot(dirX, dirY) || 1;
-    const a = Math.atan2(dirY / dl, dirX / dl) + (rng() - 0.5) * 1.4;
-    const ca = Math.cos(a);
-    const sa = Math.sin(a);
-    const len = baseR * (0.3 + rng() * 0.6);
-    const bend = (rng() - 0.5) * len * 0.3;
+    for (let c = 0; c < count; c++) {
+      const A = nodes[Math.floor(rng() * nodes.length)];
+      let B = null;
+      for (let t = 0; t < 16 && !B; t++) {
+        const cand = nodes[Math.floor(rng() * nodes.length)];
+        if (cand.road === A.road) continue; // соединяем именно РАЗНЫЕ улицы
+        const dx = cand.x - A.x;
+        const dy = cand.y - A.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= min2 && d2 <= max2) B = cand;
+      }
+      if (!B) continue;
+      const street = this._curveBetween(A.x, A.y, B.x, B.y, rng);
+      roads.push(street);
+      const mid = street[street.length >> 1];
+      nodes.push({ x: mid[0], y: mid[1], road: roads.length - 1 });
+    }
+  }
 
+  /* Собирает все точки улиц в плоский список узлов с индексом своей улицы. */
+  _streetNodes(roads) {
+    const nodes = [];
+    for (let ri = 0; ri < roads.length; ri++) {
+      const r = roads[ri];
+      for (let i = 0; i < r.length; i++) nodes.push({ x: r[i][0], y: r[i][1], road: ri });
+    }
+    return nodes;
+  }
+
+  /* Плавная (слегка изогнутая) улица между двумя точками. */
+  _curveBetween(ax, ay, bx, by, rng) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const L = Math.hypot(dx, dy) || 1;
+    const nx = -dy / L;
+    const ny = dx / L;
+    const bow = (rng() - 0.5) * L * 0.18;
     const pts = [];
-    const steps = 5;
+    const steps = 4;
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      const along = t * len;
-      const curve = Math.sin(t * Math.PI) * bend;
-      pts.push([p[0] + along * ca + curve * -sa, p[1] + along * sa + curve * ca]);
+      const curve = Math.sin(t * Math.PI) * bow;
+      pts.push([ax + dx * t + nx * curve, ay + dy * t + ny * curve]);
     }
-    roads.push(pts);
+    return pts;
   }
 
   /*
@@ -207,7 +239,7 @@ class TownBuilder {
    * доля гражданских/промышленных зданий тоже зависит от вида.
    */
   _placeAlongRoad(road, town, baseR, grid, rng, indDir, placed, buildings, def) {
-    const step = 1.3;
+    const step = 1.0;
     for (let s = 0; s < road.length - 1; s++) {
       const a = road[s];
       const b = road[s + 1];
@@ -268,9 +300,12 @@ class TownBuilder {
           }
 
           if (this._isBlocked(grid, bx, by)) continue;
-          if (this._tooClose(placed, bx, by, Math.max(w, h) * 0.7)) continue;
+          // Радиус описанной окружности здания: непересекающиеся окружности →
+          // непересекающиеся дома, поэтому здания гарантированно не наслаиваются.
+          const br = 0.5 * Math.hypot(w, h);
+          if (this._tooClose(placed, bx, by, br)) continue;
 
-          placed.push([bx, by]);
+          placed.push([bx, by, br]);
           buildings.push({
             x: bx,
             y: by,
@@ -290,21 +325,16 @@ class TownBuilder {
     const n = 2 + Math.floor(rng() * 3);
     for (let i = 0; i < n; i++) {
       const a = rng() * Math.PI * 2;
-      const r = baseR * (0.7 + rng() * 0.45);
-      const bx = town.x + Math.cos(a) * r;
-      const by = town.y + Math.sin(a) * r;
+      const rad = baseR * (0.7 + rng() * 0.45);
+      const bx = town.x + Math.cos(a) * rad;
+      const by = town.y + Math.sin(a) * rad;
+      const w = 0.9 + rng() * 0.6;
+      const h = 0.8 + rng() * 0.5;
+      const br = 0.5 * Math.hypot(w, h);
       if (this._isBlocked(grid, bx, by)) continue;
-      if (this._tooClose(placed, bx, by, 1.6)) continue;
-      placed.push([bx, by]);
-      buildings.push({
-        x: bx,
-        y: by,
-        w: 0.9 + rng() * 0.6,
-        h: 0.8 + rng() * 0.5,
-        angle: rng() * Math.PI,
-        kind: "house",
-        tone: rng(),
-      });
+      if (this._tooClose(placed, bx, by, br)) continue;
+      placed.push([bx, by, br]);
+      buildings.push({ x: bx, y: by, w, h, angle: rng() * Math.PI, kind: "house", tone: rng() });
     }
   }
 
@@ -313,13 +343,18 @@ class TownBuilder {
     return ((a - b + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
   }
 
-  /* Не слишком ли близко новая точка к уже поставленным зданиям? */
-  _tooClose(placed, x, y, minD) {
-    const min2 = minD * minD;
+  /*
+   * Пересечётся ли новое здание (радиус r) с уже поставленными? Сравниваем
+   * расстояние между центрами с суммой радиусов описанных окружностей плюс
+   * небольшой зазор. Так дома гарантированно не наслаиваются друг на друга.
+   */
+  _tooClose(placed, x, y, r) {
+    const gap = 0.18; // минимальный зазор между домами (в клетках)
     for (let i = placed.length - 1; i >= 0; i--) {
       const dx = placed[i][0] - x;
       const dy = placed[i][1] - y;
-      if (dx * dx + dy * dy < min2) return true;
+      const minD = r + placed[i][2] + gap;
+      if (dx * dx + dy * dy < minD * minD) return true;
     }
     return false;
   }
