@@ -635,6 +635,7 @@ class MapRenderer {
       this._drawTownParks(town, vf);
       if (st.tier >= 2) this._drawTownSquare(town);
       this._drawTownStreets(town, vf);
+      this._drawTownBridges(map, town, vf);
       this._drawTownBuildings(town, vf, st.industry);
     }
     // Точка-отметка для мелких пунктов (деревня/село) — чтобы их не потерять.
@@ -727,6 +728,49 @@ class MapRenderer {
         }
       }
       ctx.stroke();
+    }
+  }
+
+  /*
+   * Мосты внутри города: там, где главная улица («проспект») проходит над водой
+   * (рекой), рисуем поперечные «перильца». Обычные улицы у воды обрываются (см.
+   * town.js), поэтому мост получается только на проспекте — как в жизни.
+   */
+  _drawTownBridges(map, town, vf = 1) {
+    if (!town.streets) return;
+    const ctx = this.ctx;
+    const s = this.scale;
+    const visR2 = (vf * (town.radius || 1)) ** 2;
+    const size = map.size;
+    ctx.strokeStyle = COLORS.BRIDGE;
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1.6;
+    for (const street of town.streets) {
+      if (!street.major) continue;
+      const pts = street.pts;
+      if (!pts || pts.length < 2) continue;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const mx = (a[0] + b[0]) / 2;
+        const my = (a[1] + b[1]) / 2;
+        const dx = mx - town.x;
+        const dy = my - town.y;
+        if (dx * dx + dy * dy > visR2) continue;
+        const cx = Math.round(mx);
+        const cy = Math.round(my);
+        if (cx < 0 || cy < 0 || cx >= size || cy >= size) continue;
+        if (map.type[cy * size + cx] !== TERRAIN.WATER) continue;
+        const ex = b[0] - a[0];
+        const ey = b[1] - a[1];
+        const L = Math.hypot(ex, ey) || 1;
+        const nx = -ey / L;
+        const ny = ex / L;
+        ctx.beginPath();
+        ctx.moveTo(mx * s + nx * 3, my * s + ny * 3);
+        ctx.lineTo(mx * s - nx * 3, my * s - ny * 3);
+        ctx.stroke();
+      }
     }
   }
 

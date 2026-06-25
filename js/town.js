@@ -135,7 +135,7 @@ class TownBuilder {
       const p0 = this._toWorld(f, u, -vm);
       const p1 = this._toWorld(f, u, vm);
       for (const seg of this._clipToBand(p0, p1, town.x, town.y, d.rMin, d.rMax)) {
-        streets.push({ pts: seg, major: i === midU });
+        this._pushStreet(streets, seg, i === midU, grid);
       }
     }
     for (let j = 0; j <= N; j++) {
@@ -145,7 +145,7 @@ class TownBuilder {
       const p0 = this._toWorld(f, -um, v);
       const p1 = this._toWorld(f, um, v);
       for (const seg of this._clipToBand(p0, p1, town.x, town.y, d.rMin, d.rMax)) {
-        streets.push({ pts: seg, major: j === midV });
+        this._pushStreet(streets, seg, j === midV, grid);
       }
     }
 
@@ -175,6 +175,53 @@ class TownBuilder {
       }
     }
     return segs.filter((s) => s.length >= 2);
+  }
+
+  /*
+   * Кладёт улицу в список. Обычные улицы обрываются у воды (упираются в
+   * набережную), а главные «проспекты» проходят над водой целиком — по ним
+   * потом рисуются мосты.
+   */
+  _pushStreet(streets, seg, major, grid) {
+    if (major) {
+      streets.push({ pts: seg, major: true });
+      return;
+    }
+    for (const land of this._clipToLand(seg, grid)) {
+      streets.push({ pts: land, major: false });
+    }
+  }
+
+  /* Делит полилинию на сухопутные куски (выкидывает участки над водой). */
+  _clipToLand(pts, grid) {
+    const out = [];
+    let cur = null;
+    for (const p of pts) {
+      if (this._isWater(grid, p[0], p[1])) {
+        cur = null;
+      } else {
+        if (!cur) { cur = []; out.push(cur); }
+        cur.push(p);
+      }
+    }
+    return out.filter((s) => s.length >= 2);
+  }
+
+  /* Вода ли в клетке под точкой (или за картой). */
+  _isWater(grid, wx, wy) {
+    const x = Math.round(wx);
+    const y = Math.round(wy);
+    if (x < 0 || y < 0 || x >= grid.size || y >= grid.size) return true;
+    return grid.type[y * grid.size + x] === TERRAIN.WATER;
+  }
+
+  /* Есть ли вода рядом с точкой (в пределах ~квартала) — для набережных. */
+  _nearWater(grid, bx, by, cell) {
+    const o = cell * 0.6;
+    return (
+      this._isWater(grid, bx + o, by) || this._isWater(grid, bx - o, by) ||
+      this._isWater(grid, bx, by + o) || this._isWater(grid, bx, by - o)
+    );
   }
 
   /* Застраивает один квартал [u0,u1]×[v0,v1] (или делает его парком). */
@@ -207,7 +254,10 @@ class TownBuilder {
       def.industrial > 0 && dR > 0.55 &&
       Math.abs(this._angDiff(angToC, indDir)) < 0.7 && rng() < def.industrial * 1.6;
 
-    if (bigPark || (!industrial && rng() < 0.08 + dR * 0.1)) {
+    // Кварталы у воды часто отдаём под зелёную набережную.
+    const riverside = this._nearWater(grid, bx, by, cell);
+
+    if (bigPark || (riverside && !industrial && rng() < 0.55) || (!industrial && rng() < 0.08 + dR * 0.1)) {
       const inset = cell * 0.12;
       parks.push({
         poly: [
