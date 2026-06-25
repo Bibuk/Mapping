@@ -50,7 +50,12 @@
           Населённых пунктов: <span id="townsLabel">8</span>
           <input type="range" id="towns" min="0" max="24" step="1" value="8" />
         </label>
-        <p class="hint">Чем больше пунктов, тем больше видов: от деревень до мегаполисов.</p>
+
+        <label>
+          Точек ресурсов: <span id="resLabel">10</span>
+          <input type="range" id="resources" min="0" max="30" step="1" value="10" />
+        </label>
+        <p class="hint">Пункты сами тянут дороги к ресурсам, строят шахты, торгуют и растут — вид (деревня…мегаполис) определяется развитием.</p>
       </section>
 
       <section class="control-group">
@@ -74,6 +79,22 @@
       </section>
 
       <section class="control-group">
+        <h2>Развитие (годы)</h2>
+        <div class="play-row">
+          <button id="play" title="Проиграть развитие">▶</button>
+          <button id="toFinal" title="К финалу">⏭</button>
+          <span id="yearLabel" class="year-label">год 1</span>
+        </div>
+        <label>
+          <input type="range" id="year" min="0" max="0" step="1" value="0" />
+        </label>
+        <label>
+          Скорость: <span id="speedLabel">12</span> лет/с
+          <input type="range" id="speed" min="1" max="30" step="1" value="12" />
+        </label>
+      </section>
+
+      <section class="control-group">
         <button id="generate" class="primary">Сгенерировать карту</button>
         <button id="export">Сохранить в PNG</button>
       </section>
@@ -91,6 +112,7 @@
   <script src="js/noise.js"></script>
   <script src="js/generator.js"></script>
   <script src="js/town.js"></script>
+  <script src="js/simulation.js"></script>
   <script src="js/renderer.js"></script>
   <script src="js/main.js"></script>
 </body>
